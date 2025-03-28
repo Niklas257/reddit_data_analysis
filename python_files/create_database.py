@@ -188,6 +188,14 @@ def create_subreddit_tables(con, subreddit):
     """
     con.execute(query)
 
+    query = f"""
+    CREATE TABLE IF NOT EXISTS filtered_{subreddit}_threads AS
+    SELECT *
+    FROM filtered_threads
+    WHERE posts IN (SELECT id FROM {subreddit}_ids)
+    """
+    con.execute(query)
+
 
 def create_threads_table(con):
     cursor = con.execute("PRAGMA table_info('lookup_table')")
