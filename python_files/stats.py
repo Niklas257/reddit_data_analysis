@@ -1,6 +1,7 @@
 from create_database import filter_valid_tables
 import json
 from collections import defaultdict
+import numpy as np
 
 
 # Create row_counts table in stats.db
@@ -17,10 +18,11 @@ def create_row_counts_table(con):
     tables = con.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
     ).fetchall()
+    print(tables[0])
 
     tables = filter_valid_tables(tables)
 
-    for (table_name,) in tables:
+    for table_name in tables:
         # Get count from main database
         row_count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
         # Insert into stats database
@@ -116,8 +118,18 @@ def analyze_thread_score_distribution(table, con):
     distribution = {row[0]: row[1] for row in results}
 
     # Save to file with the appropriate key
-    with open("../data/saved_stats", "w") as f:
-        json.dump({f"thread_score_distribution_{table}": distribution}, f)
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+
+    # Add the new data to the existing dictionary
+    existing_data[f"thread_score_distribution_{table}"] = distribution
+
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)
 
 
 def get_subreddit_distribution(table, con):
@@ -143,9 +155,24 @@ def get_subreddit_distribution(table, con):
     """
     ).fetchdf()
 
+    subreddit_dict = dict(
+        zip(distribution["subreddit"], distribution["number_of_posts"])
+    )
+    # Convert any NumPy integers to Python integers
+    subreddit_dict = {k: int(v) for k, v in subreddit_dict.items()}
     # Save to file with the appropriate key
-    with open("../data/saved_stats", "w") as f:
-        json.dump({f"subreddit_distribution_{table}": distribution}, f)
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+
+    # Add the new data to the existing dictionary
+    existing_data[f"subreddit_distribution_{table}"] = subreddit_dict
+
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)
 
 
 # Get length and width statistics for a lookup table
@@ -198,28 +225,47 @@ def table_stats(table, con):
         thread_widths[max_width] += 1
 
     # Save to file with the appropriate key
-    with open("../data/saved_stats", "w") as f:
-        json.dump(
-            {
-                f"thread_lengths_{table}": thread_lengths,
-                f"thread_widths_{table}": thread_widths,
-                f"all_widths_{table}": all_widths,
-            },
-            f,
-        )
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+
+    # Add the new data to the existing dictionary
+    existing_data[f"thread_lengths_{table}"] = thread_lengths
+    existing_data[f"thread_widths_{table}"] = thread_widths
+    existing_data[f"all_widths_{table}"] = all_widths
+
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)
 
 
 def calculate_weighted_average(table):
-    with open("../data/saved_stats", "r") as f:
+    with open("../data/saved_stats.json", "r") as f:
         data = json.load(f)
         dictionary = data.get(table, {})
 
-    weighted_average = sum(key * value for key, value in dictionary.items()) / sum(
-        dictionary.values()
-    )
+    if len(dictionary) == 0:
+        print(f"No data found for {table}")
+        return
+    weighted_average = sum(
+        int(key) * int(value) for key, value in dictionary.items()
+    ) / sum(dictionary.values())
     # Save to file with the appropriate key
-    with open("../data/saved_stats", "w") as f:
-        json.dump({f"{table}_weighted_average": weighted_average}, f)
+    # Read the existing data first
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+
+    # Add the new data to the existing dictionary
+    existing_data[f"{table}_weighted_average"] = weighted_average
+
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)
 
 
 def get_thread_lengths(table, con):
@@ -228,4 +274,25 @@ def get_thread_lengths(table, con):
     for i in range(len(df) - 1):
         current_count = df.loc[i, "row_count"]
         previous_count = df.loc[i + 1, "row_count"]
-        thread_lengths[i] = current_count - previous_count
+        if i == len(df) - 2:
+            thread_lengths[i] = current_count - previous_count
+            thread_lengths[i + 1] = current_count
+        else:
+            thread_lengths[i] = current_count - previous_count
+
+    thread_lengths = {
+        k: int(v) if isinstance(v, np.int64) else v for k, v in thread_lengths.items()
+    }
+    # Save to file with the appropriate key
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+
+    # Add the new data to the existing dictionary
+    existing_data[f"thread_lengths_{table}"] = thread_lengths
+
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)

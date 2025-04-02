@@ -5,7 +5,7 @@ import re
 def add_initial_tables(con, posts_file, comments_file):
     # Create posts table
     query = f"""
-    CREATE TABLE posts AS
+    CREATE OR REPLACE TABLE posts AS
     SELECT id, title, selftext, subreddit, score, upvote_ratio, media, author
     FROM read_csv_auto('{posts_file}',
                     null_padding=True,
@@ -15,13 +15,15 @@ def add_initial_tables(con, posts_file, comments_file):
 
     # Create comments_to_posts table
     query = f"""
-    CREATE TABLE comments_to_posts AS
+    CREATE OR REPLACE TABLE comments_to_posts AS
     SELECT id, body, score, author,
-    SUBSTRING(c.parent_id, 4) AS parent_id,
+    -- SUBSTRING(c.parent_id, 4) AS parent_id
+    c.parent_id AS parent_id
     FROM read_csv_auto('{comments_file}',
                     null_padding=True,
                     ignore_errors=True) AS c
-    WHERE SUBSTRING(c.parent_id, 4) IN (
+    -- WHERE SUBSTRING(c.parent_id, 4) IN (
+    WHERE c.parent_id IN (
     SELECT id FROM posts
     )
     """
@@ -29,13 +31,15 @@ def add_initial_tables(con, posts_file, comments_file):
 
     # Create comments_to_comments_1 table
     query = f"""
-    CREATE TABLE comments_to_comments_1 AS
+    CREATE OR REPLACE TABLE comments_to_comments_1 AS
     SELECT id, body, score, author,
-    SUBSTRING(c.parent_id, 4) AS parent_id,
+    -- SUBSTRING(c.parent_id, 4) AS parent_id
+    c.parent_id AS parent_id
     FROM read_csv_auto('{comments_file}',
                     null_padding=True,
                     ignore_errors=True) AS c
-    WHERE SUBSTRING(c.parent_id, 4) IN (
+    -- WHERE SUBSTRING(c.parent_id, 4) IN (
+    WHERE c.parent_id IN (
     SELECT id FROM comments_to_posts
     )
     """
@@ -53,11 +57,13 @@ def add_comments_to_comments_tables(con, comments_file):
         # Query to find comments referencing the current level
         query = f"""
         SELECT id, body, score, author,
-        SUBSTRING(c.parent_id, 4) AS parent_id,
+        -- SUBSTRING(c.parent_id, 4) AS parent_id
+        c.parent_id AS parent_id
         FROM read_csv_auto('{comments_file}',
                         null_padding=True,
                         ignore_errors=True) AS c
-        WHERE SUBSTRING(c.parent_id, 4) IN (
+        -- WHERE SUBSTRING(c.parent_id, 4) IN (
+        WHERE c.parent_id IN (
         SELECT id FROM comments_to_comments_{current_level}
         )
         """
@@ -91,6 +97,7 @@ def add_comments_to_comments_tables(con, comments_file):
 def filter_valid_tables(tables):
     valid_tables = []
     for t in tables:
+        t = t[0]
         if t == "posts":
             valid_tables.append(t)
         elif t == "comments_to_posts":
@@ -103,6 +110,18 @@ def filter_valid_tables(tables):
     return valid_tables
 
 
+# Sort tables in hierarchical order:
+# "posts" first, then "comments_to_posts", then "comments_to_comments_1",…
+def sort_key(t):
+    if t == "posts":
+        return (0, 0)
+    elif t == "comments_to_posts":
+        return (1, 0)
+    else:
+        num = int(re.search(r"comments_to_comments_(\d+)", t).group(1))
+        return (2, num)
+
+
 # Create lookup table
 def create_lookup_table(con):
     tables = con.execute(
@@ -110,17 +129,6 @@ def create_lookup_table(con):
     ).fetchall()
 
     valid_tables = filter_valid_tables(tables)
-
-    # Sort tables in hierarchical order:
-    # "posts" first, then "comments_to_posts", then "comments_to_comments_1",…
-    def sort_key(t):
-        if t == "posts":
-            return (0, 0)
-        elif t == "comments_to_posts":
-            return (1, 0)
-        else:
-            num = int(re.search(r"comments_to_comments_(\d+)", t).group(1))
-            return (2, num)
 
     valid_tables.sort(key=sort_key)
 
@@ -197,17 +205,23 @@ def create_subreddit_tables(con, subreddit):
     con.execute(query)
 
 
-def create_threads_table(con):
-    cursor = con.execute("PRAGMA table_info('lookup_table')")
-    columns = [row[1] for row in cursor.fetchall()]
+def create_threads_table(con, threads_table):
+    columns = con.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+    ).fetchall()
+
+    columns = filter_valid_tables(columns)
+
+    columns.sort(key=sort_key)
+
     create_table_sql = f"""
-    CREATE OR REPLACE TABLE threads (
+    CREATE OR REPLACE TABLE {threads_table} (
         {', '.join(f'{col} VARCHAR' for col in columns)}
     )"""
     con.execute(create_table_sql)
 
     queries = []
-    for depth in range(len(columns), 0, -1):
+    for depth in range(len(columns) - 1, 0, -1):
         # Determine the starting table name based on depth
         if depth == 0:
             starting_table = "posts"
@@ -249,5 +263,5 @@ def create_threads_table(con):
 
     # Combine all queries with UNION ALL and insert into the threads table
     if queries:
-        final_query = "INSERT INTO threads\n" + "\nUNION ALL\n".join(queries)
+        final_query = f"INSERT INTO {threads_table}\n" + "\nUNION ALL\n".join(queries)
         con.execute(final_query)

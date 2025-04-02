@@ -1,4 +1,4 @@
-def make_threads_unique(con):
+def make_threads_unique(con, filtered_table):
     cursor = con.execute("PRAGMA table_info('lookup_table')")
     columns = [row[1] for row in cursor.fetchall()]
     columns_str = ", ".join(columns)
@@ -20,35 +20,41 @@ def make_threads_unique(con):
             CASE WHEN comments_to_posts IS NOT NULL THEN 1 ELSE 0 END +
             {non_null_counts_str}) AS thread_length,
             -- Assign a random number to each thread for tie-breaking
-            ROW_NUMBER() OVER (PARTITION BY comments_to_posts ORDER BY RANDOM()) AS random_rank
-        FROM threads
+            ROW_NUMBER() OVER (
+                PARTITION BY comments_to_posts
+                ORDER BY thread_length DESC, RANDOM()
+            ) AS random_rank
+        FROM all_threads
     )
     SELECT
         {columns_str}
     FROM ranked_threads
-    WHERE random_rank = 1  -- Keep only one thread per comments_to_posts ID
+    WHERE random_rank = 1  -- Keep only the thread with the highest thread_length, using random_rank for tie-breaking
+      AND comments_to_posts IS NOT NULL  -- Apply only when comments_to_posts is not NULL
     ORDER BY comments_to_posts;
     """
 
     # Execute the query and replace the threads table with the filtered results
-    con.execute("CREATE OR REPLACE TABLE filtered_threads AS " + distinct_threads_query)
+    con.execute(
+        f"CREATE OR REPLACE TABLE {filtered_table} AS " + distinct_threads_query
+    )
 
 
-def filter_threads(con):
+def filter_threads(con, table_to_filter):
     # Create a new table for filtered results
     con.execute(
-        """
-        CREATE OR REPLACE TABLE filtered_threads AS 
-        SELECT * FROM threads WHERE FALSE
+        f"""
+        CREATE OR REPLACE TABLE filtered_threads AS
+        SELECT * FROM {table_to_filter} WHERE FALSE
     """
     )
 
     # Get column names (excluding 'posts')
     columns = con.execute(
-        """
+        f"""
         SELECT column_name
         FROM information_schema.columns
-        WHERE table_name = 'threads'
+        WHERE table_name = '{table_to_filter}'
           AND column_name != 'posts'
     """
     ).fetchall()
@@ -61,9 +67,7 @@ def filter_threads(con):
     id_to_content = {}  # Track content (title, self_text, body) for each ID
 
     # Fetch posts data
-    posts_data = con.execute(
-        "SELECT id, author, title, selftext FROM posts"
-    ).fetchall()
+    posts_data = con.execute("SELECT id, author, title, selftext FROM posts").fetchall()
     for id, author, title, selftext in posts_data:
         id_to_author[id] = author
         # Check if any content is [deleted] or [removed]
@@ -90,7 +94,7 @@ def filter_threads(con):
             )
 
     # Fetch all rows from the threads table
-    rows = con.execute("SELECT * FROM threads").fetchall()
+    rows = con.execute(f"SELECT * FROM {table_to_filter}").fetchall()
 
     # Process each row
     valid_rows = []

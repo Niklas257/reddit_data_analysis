@@ -34,11 +34,9 @@ create_threads_table(con)
 make_threads_unique(con)
 filter_threads(con)
 
-create_filtered_row_counts("filtered_lookup", con)
 create_filtered_row_counts("filtered_threads", con)
 get_thread_lengths("filtered_threads", con)
 
-# Todo: File to save the outputs
 analyze_thread_score_distribution("threads", con)
 analyze_thread_score_distribution("filtered_threads", con)
 get_subreddit_distribution("threads", con)

@@ -5,19 +5,19 @@ from tqdm import tqdm
 import json
 
 
-def get_random_thread_details(con):
+def get_random_thread_details(table, con):
 
-    # Get the count of rows in filtered_threads
-    count = con.execute("SELECT COUNT(*) FROM filtered_threads").fetchone()[0]
+    # Get the count of rows in table
+    count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
     if count == 0:
-        print("No threads found in filtered_threads table.")
+        print(f"No threads found in {table} table.")
         return None
 
-    # Select a random row from filtered_threads
+    # Select a random row from table
     random_offset = random.randint(0, count - 1)
     random_thread = con.execute(
-        f"SELECT * FROM filtered_threads OFFSET {random_offset} LIMIT 1"
+        f"SELECT * FROM {table} OFFSET {random_offset} LIMIT 1"
     ).fetchdf()
 
     print("Random thread selected:")
