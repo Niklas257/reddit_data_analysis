@@ -2,6 +2,7 @@ from create_database import filter_valid_tables
 import json
 from collections import defaultdict
 import numpy as np
+import ast
 
 
 # Create row_counts table in stats.db
@@ -18,19 +19,49 @@ def create_row_counts_table(con):
     tables = con.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
     ).fetchall()
-    print(tables[0])
 
     tables = filter_valid_tables(tables)
-
+    row_counts = {}
     for table_name in tables:
-        # Get count from main database
+        # Get count
         row_count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-        # Insert into stats database
+        # Insert into database
+        row_counts[table_name] = row_count
         con.execute(f"INSERT INTO row_counts VALUES ('{table_name}', {row_count})")
 
+    # Add the table with table_names as keys and row_counts as values
+    # to the saved_stats.json file
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+    # Add the new data to the existing dictionary
+    existing_data["row_counts_unfiltered"] = row_counts
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)
 
-def create_filtered_row_counts(table, con):
-    # Get column names from filtered_threads
+
+def get_number_of_threads(table, con):
+    row_count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    # Save to file with the appropriate key
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+
+    # Add the new data to the existing dictionary
+    existing_data[f"number_of_threads_{table}"] = row_count
+
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)
+
+
+def get_depth_distribution(table, con):
+    # Get column names from table
     columns = con.execute(
         f"""
         SELECT column_name
@@ -43,7 +74,7 @@ def create_filtered_row_counts(table, con):
     # Create the filtered_row_counts table
     con.execute(
         f"""
-        CREATE OR REPLACE TABLE filtered_row_counts_{table} (
+        CREATE OR REPLACE TABLE depth_distribution_{table} (
             conversation_length VARCHAR,
             row_count BIGINT
         )
@@ -51,6 +82,7 @@ def create_filtered_row_counts(table, con):
     )
 
     # Count non-NULL values for each column and insert into filtered_row_counts
+    row_counts = {}
     for column in columns:
         count_query = f"""
             SELECT COUNT(*)
@@ -58,15 +90,27 @@ def create_filtered_row_counts(table, con):
             WHERE {column} IS NOT NULL
         """
         row_count = con.execute(count_query).fetchone()[0]
+        row_counts[column] = row_count
         con.execute(
             f"""
-            INSERT INTO filtered_row_counts_{table}
+            INSERT INTO depth_distribution_{table}
             VALUES ('{column}', {row_count})
         """
         )
 
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+    # Add the new data to the existing dictionary
+    existing_data[f"depth_distribution_{table}"] = row_counts
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)
 
-def analyze_thread_score_distribution(table, con):
+
+def get_thread_score_distribution(table, con):
     """
     Analyzes the distribution of total scores across threads in the database.
     Uses SQL aggregation for efficiency with large datasets.
@@ -177,7 +221,6 @@ def get_subreddit_distribution(table, con):
 
 # Get length and width statistics for a lookup table
 def table_stats(table, con):
-
     # Initialize dictionaries with default values of 0
     thread_lengths = defaultdict(int)
     thread_widths = defaultdict(int)
@@ -187,6 +230,15 @@ def table_stats(table, con):
     result = con.execute(f"SELECT * FROM {table}").fetchall()
     column_names = con.execute(f"PRAGMA table_info({table})").fetchdf()["name"].tolist()
 
+    # Check if this is a lookup table (values are lists) or a regular table (values are strings)
+    sample_row = result[0] if result else None
+    is_lookup_table = False
+    if sample_row:
+        for value in sample_row[1:]:  # Skip first column
+            if value and isinstance(value, str) and value.startswith("["):
+                is_lookup_table = True
+                break
+
     # Process each row
     for row in result:
         # Count non-null columns in this row, excluding the first column
@@ -195,32 +247,28 @@ def table_stats(table, con):
 
         max_width = 0
         # Process each non-null column, excluding the first column
-        for i, value in enumerate(
-            row[1:], start=1
-        ):  # start=1 to maintain correct column index
+        for i, value in enumerate(row[1:], start=1):
             if value is not None:
-                # Assuming the non-null values are lists or can be evaluated as lists
-                try:
-                    # Parse the list if it's stored as a string
-                    if isinstance(value, str):
-                        value_list = eval(value)
-                    else:
-                        value_list = value
+                if is_lookup_table:
+                    # Handle lookup table format (lists)
+                    try:
+                        if isinstance(value, str):
+                            value_list = ast.literal_eval(value)
+                        else:
+                            value_list = value
+                        list_length = len(value_list)
+                        if list_length > max_width:
+                            max_width = list_length
+                        all_widths[list_length] += 1
+                    except Exception:
+                        print(
+                            f"Warning: Could not process list value in column {column_names[i]}: {value}"
+                        )
+                else:
+                    # Handle regular table format (single values)
+                    max_width = max(max_width, 1)
+                    all_widths[1] += 1
 
-                    # Get the length of the list
-                    list_length = len(value_list)
-
-                    if list_length > max_width:
-                        max_width = list_length
-
-                    # Increment the count for this list length in all_widths
-                    all_widths[list_length] += 1
-
-                except Exception:
-                    # Handle the case where the value isn't a valid list
-                    print(
-                        f"Warning: Could not process value in column {column_names[i]}: {value}"
-                    )
         # Update thread_widths with the maximum list length for this row
         thread_widths[max_width] += 1
 
@@ -269,7 +317,7 @@ def calculate_weighted_average(table):
 
 
 def get_thread_lengths(table, con):
-    df = con.execute(f"SELECT * FROM filtered_row_counts_{table}").fetchdf()
+    df = con.execute(f"SELECT * FROM depth_distribution_{table}").fetchdf()
     thread_lengths = {}
     for i in range(len(df) - 1):
         current_count = df.loc[i, "row_count"]
@@ -293,6 +341,86 @@ def get_thread_lengths(table, con):
     # Add the new data to the existing dictionary
     existing_data[f"thread_lengths_{table}"] = thread_lengths
 
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)
+
+
+def get_author_distribution(table, con):
+    """
+    Analyzes the distribution of unique authors per thread in filtered threads using efficient DuckDB queries.
+
+    Returns:
+        pandas.DataFrame: DataFrame with number of authors and how many threads have that many authors,
+                         sorted by number of authors.
+    """
+    # Retrieve all comment columns from table
+    columns = con.execute(
+        f"""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = '{table}'
+        AND column_name LIKE 'comments_%'
+    """
+    ).fetchall()
+    columns = [col[0] for col in columns]
+
+    # Prepare parts of the UNION ALL query for all authors (comments only)
+    parts = []
+
+    # Add comment columns parts
+    for col in columns:
+        part = f"""
+            SELECT ft.comments_to_posts, COALESCE(c_{col}.author, 'NULL_AUTHOR') AS author
+            FROM {table} ft
+            LEFT JOIN {col} c_{col} ON ft.{col} = c_{col}.id
+            WHERE ft.{col} IS NOT NULL
+        """
+        parts.append(part)
+
+    # Combine all parts with UNION ALL
+    all_authors_query = " UNION ALL ".join(parts)
+
+    # Full query to compute author distribution
+    full_query = f"""
+        WITH all_authors AS (
+            {all_authors_query}
+        ),
+        thread_author_counts AS (
+            SELECT
+                ft.comments_to_posts,
+                COUNT(DISTINCT aa.author) AS num_authors
+            FROM {table} ft
+            LEFT JOIN all_authors aa ON ft.comments_to_posts = aa.comments_to_posts
+            GROUP BY ft.comments_to_posts
+        )
+        SELECT
+            num_authors AS number_of_authors,
+            COUNT(comments_to_posts) AS number_of_threads
+        FROM thread_author_counts
+        GROUP BY num_authors
+        ORDER BY number_of_authors
+    """
+
+    # Execute the query and fetch results
+    distribution = con.execute(full_query).fetchdf()
+
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+    # Convert the DataFrame to a dictionary
+    author_distribution = dict(
+        zip(distribution["number_of_authors"], distribution["number_of_threads"])
+    )
+    # Convert any NumPy integers to Python integers
+    author_distribution = {
+        k: int(v) if isinstance(v, np.int64) else v
+        for k, v in author_distribution.items()
+    }
+    # Add the new data to the existing dictionary
+    existing_data[f"author_distribution_{table}"] = author_distribution
     # Write the updated dictionary back to the file
     with open("../data/saved_stats.json", "w") as f:
         json.dump(existing_data, f)

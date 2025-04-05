@@ -1,5 +1,224 @@
-# Add initial tables to the database
 import re
+import pandas as pd
+import gc
+
+
+# Add initial tables to the database
+def add_posts_table(con, posts_file):
+    # Create posts table
+    query = f"""
+    CREATE OR REPLACE TABLE posts AS
+    SELECT id, title, selftext, subreddit, score, upvote_ratio, media, author
+    FROM read_csv_auto('{posts_file}',
+                    null_padding=True,
+                    ignore_errors=True)
+    -- LIMIT 1000000
+    """
+    con.execute(query)
+    print("posts table created successfully.")
+
+
+def add_comments_working_table(con, comments_file):
+    # Create comments_working table
+    batch_size = 1000000  # Adjust based on your needs
+
+    # First create the target table structure
+    con.execute(
+        """
+    CREATE OR REPLACE TABLE comments_working (
+        id VARCHAR,
+        body VARCHAR,
+        score INTEGER,
+        author VARCHAR,
+        parent_id VARCHAR
+    )
+    """
+    )
+
+    chunk_counter = 0
+    total_rows = 0
+
+    for chunk in pd.read_csv(comments_file, chunksize=batch_size, dtype="str"):
+        chunk_counter += 1
+
+        # Explicit memory management
+        try:
+            # Create and insert batch
+            con.execute("CREATE TEMP TABLE batch AS SELECT * FROM chunk")
+            con.execute(
+                """
+            INSERT INTO comments_working
+            SELECT id, body, score, author, parent_id
+            FROM batch
+            """
+            )
+            rows_inserted = len(chunk)
+            total_rows += rows_inserted
+            print(
+                f"Batch {chunk_counter}: Inserted {rows_inserted} rows (Total: {total_rows})"
+            )
+            # Manually clean up
+            del chunk  # Explicitly delete the DataFrame
+            con.execute("DROP TABLE IF EXISTS batch")
+            gc.collect()  # Force garbage collection
+
+            # Progress tracking
+
+        except Exception as e:
+            print(f"Error processing batch {chunk_counter}: {str(e)}")
+            con.execute("DROP TABLE IF EXISTS batch")
+            raise
+
+    print(f"Finished loading {total_rows} total rows")
+
+
+def add_initial_comments_tables(con):
+    # Create comments_to_posts table
+    con.execute("BEGIN TRANSACTION")
+
+    try:
+        # Create the target table if it doesn't exist
+        con.execute(
+            """
+        CREATE OR REPLACE TABLE comments_to_posts (
+            id VARCHAR,
+            body VARCHAR,
+            score INTEGER,
+            author VARCHAR,
+            parent_id VARCHAR
+        )
+        """
+        )
+
+        # Insert matching records
+        con.execute(
+            """
+        INSERT INTO comments_to_posts
+        SELECT id, body, score, author, SUBSTRING(parent_id, 4) AS parent_id
+        FROM comments_working
+        WHERE SUBSTRING(parent_id, 4) IN (SELECT id FROM posts)
+        """
+        )
+        print("Inserted matching comments into comments_to_posts table successfully.")
+
+        # Delete processed records
+        con.execute(
+            """
+        DELETE FROM comments_working
+        WHERE SUBSTRING(parent_id, 4) IN (SELECT id FROM posts)
+        """
+        )
+
+        con.execute("COMMIT")
+        print("Successfully moved and deleted matching comments")
+
+    except Exception as e:
+        con.execute("ROLLBACK")
+        print(f"Error: {e}")
+
+    # Create comments_to_comments_1 table
+    con.execute("BEGIN TRANSACTION")
+
+    try:
+        # Create the target table if it doesn't exist
+        con.execute(
+            """
+        CREATE OR REPLACE TABLE comments_to_comments_1 (
+            id VARCHAR,
+            body VARCHAR,
+            score INTEGER,
+            author VARCHAR,
+            parent_id VARCHAR
+        )
+        """
+        )
+
+        # Insert matching records
+        con.execute(
+            """
+        INSERT INTO comments_to_comments_1
+        SELECT id, body, score, author, SUBSTRING(parent_id, 4) AS parent_id
+        FROM comments_working
+        WHERE SUBSTRING(parent_id, 4) IN (SELECT id FROM comments_to_posts)
+        """
+        )
+        print(
+            "Inserted matching comments into comments_to_comments_1 table successfully."
+        )
+
+        # Delete processed records
+        con.execute(
+            """
+        DELETE FROM comments_working
+        WHERE SUBSTRING(parent_id, 4) IN (SELECT id FROM comments_to_posts)
+        """
+        )
+
+        con.execute("COMMIT")
+        print("Successfully moved and deleted matching comments")
+
+    except Exception as e:
+        con.execute("ROLLBACK")
+        print(f"Error: {e}")
+
+
+# Add comments_to_comments tables
+def add_comments_to_comments_tables(con):
+    current_level = 1
+    rows_found = 1  # Initialize with a non-zero value to enter the loop
+
+    while rows_found > 0:
+        next_level = current_level + 1
+
+        # Start transaction
+        con.execute("BEGIN TRANSACTION")
+
+        try:
+            # First, count how many comments we'll process at this level
+            count_query = f"""
+            SELECT COUNT(*)
+            FROM comments_working AS c
+            WHERE SUBSTRING(c.parent_id, 4) IN (
+                SELECT id FROM comments_to_comments_{current_level}
+            )
+            """
+            rows_found = con.execute(count_query).fetchone()[0]
+            print(f"Found {rows_found} comments for level {next_level}")
+
+            if rows_found > 0:
+                # Create the next level table with the matching comments
+                create_table_query = f"""
+                CREATE OR REPLACE TABLE comments_to_comments_{next_level} AS
+                SELECT id, body, score, author, SUBSTRING(parent_id, 4) AS parent_id
+                FROM comments_working
+                WHERE SUBSTRING(parent_id, 4) IN (
+                    SELECT id FROM comments_to_comments_{current_level}
+                )
+                """
+                con.execute(create_table_query)
+
+                # Delete the processed rows from comments_working
+                delete_query = f"""
+                DELETE FROM comments_working
+                WHERE SUBSTRING(parent_id, 4) IN (
+                    SELECT id FROM comments_to_comments_{current_level}
+                )
+                """
+                con.execute(delete_query)
+
+                # Commit the transaction
+                con.execute("COMMIT")
+                print(f"Created level {next_level} table and deleted processed rows")
+                current_level = next_level
+            else:
+                print(f"No more nested comments found after level {current_level}")
+                con.execute("ROLLBACK")  # No changes needed
+                break
+
+        except Exception as e:
+            con.execute("ROLLBACK")
+            print(f"Error processing level {next_level}: {e}")
+            break
 
 
 def add_initial_tables(con, posts_file, comments_file):
@@ -9,7 +228,8 @@ def add_initial_tables(con, posts_file, comments_file):
     SELECT id, title, selftext, subreddit, score, upvote_ratio, media, author
     FROM read_csv_auto('{posts_file}',
                     null_padding=True,
-                    ignore_errors=True);
+                    ignore_errors=True)
+    LIMIT 280000
     """
     con.execute(query)
 
@@ -17,13 +237,13 @@ def add_initial_tables(con, posts_file, comments_file):
     query = f"""
     CREATE OR REPLACE TABLE comments_to_posts AS
     SELECT id, body, score, author,
-    -- SUBSTRING(c.parent_id, 4) AS parent_id
-    c.parent_id AS parent_id
+    SUBSTRING(c.parent_id, 4) AS parent_id
+    -- c.parent_id AS parent_id
     FROM read_csv_auto('{comments_file}',
                     null_padding=True,
                     ignore_errors=True) AS c
-    -- WHERE SUBSTRING(c.parent_id, 4) IN (
-    WHERE c.parent_id IN (
+    WHERE SUBSTRING(c.parent_id, 4) IN (
+    -- WHERE c.parent_id IN (
     SELECT id FROM posts
     )
     """
@@ -33,13 +253,13 @@ def add_initial_tables(con, posts_file, comments_file):
     query = f"""
     CREATE OR REPLACE TABLE comments_to_comments_1 AS
     SELECT id, body, score, author,
-    -- SUBSTRING(c.parent_id, 4) AS parent_id
-    c.parent_id AS parent_id
+    SUBSTRING(c.parent_id, 4) AS parent_id
+    -- c.parent_id AS parent_id
     FROM read_csv_auto('{comments_file}',
                     null_padding=True,
                     ignore_errors=True) AS c
-    -- WHERE SUBSTRING(c.parent_id, 4) IN (
-    WHERE c.parent_id IN (
+    WHERE SUBSTRING(c.parent_id, 4) IN (
+    -- WHERE c.parent_id IN (
     SELECT id FROM comments_to_posts
     )
     """
@@ -47,7 +267,7 @@ def add_initial_tables(con, posts_file, comments_file):
 
 
 # Add comments_to_comments tables
-def add_comments_to_comments_tables(con, comments_file):
+def add_comments_to_comments_tables_old(con, comments_file):
     current_level = 1
     rows_found = 1  # Initialize with a non-zero value to enter the loop
 
@@ -57,13 +277,13 @@ def add_comments_to_comments_tables(con, comments_file):
         # Query to find comments referencing the current level
         query = f"""
         SELECT id, body, score, author,
-        -- SUBSTRING(c.parent_id, 4) AS parent_id
-        c.parent_id AS parent_id
+        SUBSTRING(c.parent_id, 4) AS parent_id
+        -- c.parent_id AS parent_id
         FROM read_csv_auto('{comments_file}',
                         null_padding=True,
                         ignore_errors=True) AS c
-        -- WHERE SUBSTRING(c.parent_id, 4) IN (
-        WHERE c.parent_id IN (
+        WHERE SUBSTRING(c.parent_id, 4) IN (
+        -- WHERE c.parent_id IN (
         SELECT id FROM comments_to_comments_{current_level}
         )
         """
