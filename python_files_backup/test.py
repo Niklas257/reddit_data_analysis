@@ -28,7 +28,6 @@ def add_comments_working_table(con, comments_file):
     batch_size = 1000000  # Adjust based on your needs
 
     # First create the target table structure
-    con.execute("SET threads TO 4")  # Use 4 cores
     con.execute(
         """
     CREATE OR REPLACE TABLE comments_working (

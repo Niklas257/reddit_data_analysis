@@ -1,6 +1,9 @@
 import re
 import pandas as pd
 import gc
+import duckdb
+import concurrent.futures
+from stats import log_with_resources
 
 
 # Add initial tables to the database
@@ -15,7 +18,7 @@ def add_posts_table(con, posts_file):
     -- LIMIT 1000000
     """
     con.execute(query)
-    print("posts table created successfully.")
+    log_with_resources("posts table created successfully.")
 
 
 def add_comments_working_table(con, comments_file):
@@ -343,21 +346,18 @@ def sort_key(t):
 
 
 # Create lookup table
-def create_lookup_table(con):
+def create_lookup_table_old(con):
+    # Retrieve list of tables from the main schema.
     tables = con.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
     ).fetchall()
 
     valid_tables = filter_valid_tables(tables)
-
     valid_tables.sort(key=sort_key)
 
-    print("Valid hierarchical tables:", valid_tables)
-
     # Build subqueries for each descendant level that aggregate ids by post.
-    # For level i (starting at 1), we build a join chain from posts to the i-th table.
-    subqueries = []
     # Note: valid_tables[0] is "posts", so we start from index 1.
+    subqueries = []
     for i in range(1, len(valid_tables)):
         table_name = valid_tables[i]
         join_clause = "FROM posts p\n"
@@ -374,21 +374,90 @@ def create_lookup_table(con):
         )
         subqueries.append((table_name, subquery))
 
-    # Build the final query that creates the lookup_table.
-    # The final table will have one column for "posts" (the id from posts)
-    # plus one column per descendant table (with the aggregated ids).
+    # Materialize each subquery into a temporary table.
+    for table_name, subquery in subqueries:
+        temp_sql = f"CREATE TEMP TABLE temp_{table_name} AS\n{subquery}"
+        con.execute(temp_sql)
+        con.commit()
+
+    # Build the final lookup table by joining the temporary tables.
     final_sql = "CREATE TABLE lookup_table AS\nSELECT p.id as posts"
     for table_name, _ in subqueries:
-        final_sql += f", sub_{table_name}.{table_name}"
+        final_sql += f", temp_{table_name}.{table_name}"
     final_sql += "\nFROM posts p\n"
-    for table_name, subquery in subqueries:
-        final_sql += f"LEFT JOIN (\n{subquery}\n) sub_{table_name} ON sub_{table_name}.post_id = p.id\n"
+    for table_name, _ in subqueries:
+        final_sql += (
+            f"LEFT JOIN temp_{table_name} ON temp_{table_name}.post_id = p.id\n"
+        )
 
-    # Execute the final SQL to create the lookup_table.
     con.execute(final_sql)
     con.commit()
+    log_with_resources("lookup_table created successfully.")
 
-    print("lookup_table created successfully.")
+    # Clean up: drop the temporary tables as they are no longer needed.
+    for table_name, _ in subqueries:
+        drop_sql = f"DROP TABLE IF EXISTS temp_{table_name}"
+        con.execute(drop_sql)
+        con.commit()
+        log_with_resources(f"Temp table {table_name} dropped")
+
+
+def create_lookup_table(con):
+    # Retrieve list of tables from the main schema.
+    tables = con.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+    ).fetchall()
+
+    valid_tables = filter_valid_tables(tables)
+    valid_tables.sort(key=sort_key)
+
+    # Option A: Materialize intermediate tables within a single transaction.
+    try:
+        con.execute("BEGIN TRANSACTION;")
+        # Materialize subqueries into temporary tables.
+        subqueries = []
+        for i in range(1, len(valid_tables)):
+            table_name = valid_tables[i]
+            join_clause = "FROM posts p\n"
+            for j in range(1, i + 1):
+                alias = f"t{j}"
+                parent_alias = "p" if j == 1 else f"t{j-1}"
+                current_table = valid_tables[j]
+                join_clause += f"JOIN {current_table} {alias} ON {alias}.parent_id = {parent_alias}.id\n"
+            subquery = (
+                f"SELECT p.id as post_id, array_agg(t{i}.id) as {table_name}\n"
+                f"{join_clause}GROUP BY p.id"
+            )
+            subqueries.append((table_name, subquery))
+
+        for table_name, subquery in subqueries:
+            temp_sql = f"CREATE TEMP TABLE temp_{table_name} AS\n{subquery}"
+            con.execute(temp_sql)
+
+        # Build final lookup table by joining the temporary tables.
+        final_sql = "CREATE TABLE lookup_table AS\nSELECT p.id as posts"
+        for table_name, _ in subqueries:
+            final_sql += f", temp_{table_name}.{table_name}"
+        final_sql += "\nFROM posts p\n"
+        for table_name, _ in subqueries:
+            final_sql += (
+                f"LEFT JOIN temp_{table_name} ON temp_{table_name}.post_id = p.id\n"
+            )
+
+        con.execute(final_sql)
+
+        # Clean up: drop the temporary tables.
+        for table_name, _ in subqueries:
+            drop_sql = f"DROP TABLE IF EXISTS temp_{table_name}"
+            con.execute(drop_sql)
+
+        con.execute("COMMIT;")
+        log_with_resources("lookup_table created successfully.")
+
+    except Exception as e:
+        con.execute("ROLLBACK;")
+        log_with_resources(f"An error occurred: {e}")
+        raise
 
 
 def create_subreddit_tables(con, subreddit):
@@ -423,6 +492,7 @@ def create_subreddit_tables(con, subreddit):
     WHERE posts IN (SELECT id FROM {subreddit}_ids)
     """
     con.execute(query)
+    log_with_resources(f"Created tables for subreddit: {subreddit} successfully.")
 
 
 def create_threads_table(con, threads_table):
@@ -485,3 +555,119 @@ def create_threads_table(con, threads_table):
     if queries:
         final_query = f"INSERT INTO {threads_table}\n" + "\nUNION ALL\n".join(queries)
         con.execute(final_query)
+
+    log_with_resources(f"Created {threads_table} table successfully.")
+
+
+def process_depth_query(query, db_path):
+    """
+    Open a new connection, execute the provided query,
+    fetch all results, and return them.
+    """
+    con_worker = duckdb.connect(db_path)
+    try:
+        results = con_worker.execute(query).fetchall()
+    except Exception as e:
+        print(f"Error in query execution: {e}")
+        results = []
+    finally:
+        con_worker.close()
+    return results
+
+
+def create_threads_table_parallel(con, threads_table, db_path, max_workers=15):
+    """
+    Create a threads table by generating SQL queries based on the hierarchical
+    structure of your tables and then executing each query in parallel.
+
+    Parameters:
+      con         : Main DuckDB connection.
+      threads_table: Name of the resulting threads table.
+      db_path     : Path to the DuckDB database file (should be file based).
+      max_workers : Maximum number of parallel processes.
+    """
+    # 1. Gather columns (table names) and filter/sort them.
+    columns = con.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+    ).fetchall()
+    columns = filter_valid_tables(columns)
+    columns.sort(key=sort_key)
+
+    # 2. Create the destination table (using the columns for schema).
+    create_table_sql = f"""
+    CREATE OR REPLACE TABLE {threads_table} (
+        {', '.join(f'{col} VARCHAR' for col in columns)}
+    )
+    """
+    con.execute(create_table_sql)
+    con.commit()
+    log_with_resources(f"Created or replaced {threads_table} table schema.")
+
+    # 3. For each depth (from deepest to shallowest), construct a query.
+    queries = []
+    for depth in range(len(columns) - 1, 0, -1):
+        # Determine the starting table name based on depth.
+        if depth == 0:
+            starting_table = "posts"
+        elif depth == 1:
+            starting_table = "comments_to_posts"
+        else:
+            starting_table = f"comments_to_comments_{depth - 1}"
+
+        # Build the LEFT JOIN clauses by walking from the current depth down to 0.
+        join_clauses = []
+        for current_depth in range(depth, 0, -1):
+            parent_depth = current_depth - 1
+            if parent_depth == 0:
+                parent_table = "posts"
+            elif parent_depth == 1:
+                parent_table = "comments_to_posts"
+            else:
+                parent_table = f"comments_to_comments_{parent_depth - 1}"
+            join_clauses.append(
+                f"LEFT JOIN {parent_table} AS t{parent_depth} "
+                f"ON t{current_depth}.parent_id = t{parent_depth}.id"
+            )
+
+        # Build the SELECT clause: for columns deeper than the current depth, set to NULL.
+        select_parts = []
+        for idx, col in enumerate(columns):
+            if idx > depth:
+                select_parts.append(f"NULL AS {col}")
+            else:
+                select_parts.append(f"t{idx}.id AS {col}")
+
+        # Construct the SQL query for the current depth.
+        query = f"""
+        SELECT {', '.join(select_parts)}
+        FROM {starting_table} AS t{depth}
+        {' '.join(join_clauses)}
+        """
+        queries.append(query)
+
+    log_with_resources("Constructed all depth queries; starting parallel execution.")
+
+    # 4. Execute each query in parallel to fetch its results.
+    all_results = []
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(process_depth_query, query, db_path) for query in queries
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result()
+                all_results.extend(result)
+            except Exception as e:
+                print(f"Error during parallel query execution: {e}")
+
+    log_with_resources("All parallel depth queries executed; results gathered.")
+
+    # 5. Insert the unioned results into the threads_table.
+    # We assume the order of columns in all_results matches that in the table.
+    placeholders = ", ".join(
+        ["?"] * len(columns)
+    )  # DuckDB uses ? as the parameter placeholder.
+    insert_sql = f"INSERT INTO {threads_table} VALUES ({placeholders})"
+    con.executemany(insert_sql, all_results)
+    con.commit()
+    log_with_resources(f"Inserted unioned results into {threads_table}.")
