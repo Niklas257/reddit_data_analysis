@@ -138,13 +138,13 @@ def get_depth_distribution(table, con):
     """
     )
 
-    # Count non-NULL values for each column and insert into filtered_row_counts
+    # Count distinct non-NULL values for each column and insert into depth_distribution table
     row_counts = {}
     for column in columns:
         count_query = f"""
-            SELECT COUNT(*)
-            FROM {table}
-            WHERE {column} IS NOT NULL
+        SELECT COUNT(DISTINCT {column})
+        FROM {table}
+        WHERE {column} IS NOT NULL
         """
         row_count = con.execute(count_query).fetchone()[0]
         row_counts[column] = row_count
@@ -413,7 +413,7 @@ def process_chunk(chunk, is_lookup_table, column_names):
     return local_thread_lengths, local_thread_widths, local_all_widths
 
 
-def table_stats_parallel(table, con, num_workers=15, chunk_size=10000):
+def table_stats_parallel(table, con, max_workers=15, chunk_size=10000):
     """
     Compute table statistics in parallel by chunking the result set.
 
@@ -449,7 +449,7 @@ def table_stats_parallel(table, con, num_workers=15, chunk_size=10000):
     aggregated_all_widths = defaultdict(int)
 
     # Process chunks in parallel using ProcessPoolExecutor.
-    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(process_chunk, chunk, is_lookup_table, column_names)
             for chunk in chunks

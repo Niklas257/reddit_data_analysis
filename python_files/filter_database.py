@@ -109,6 +109,7 @@ def make_threads_unique_parallel(
     # 1. Retrieve the schema from the lookup_table.
     cursor = con.execute("PRAGMA table_info('lookup_table')")
     columns = [row[1] for row in cursor.fetchall()]
+    print(f"Columns in lookup_table: {columns}")
     columns_str = ", ".join(columns)
 
     # 2. Build the dynamic SQL snippet for counting non-NULL columns.
@@ -404,6 +405,8 @@ def filter_threads_parallel(
     # Build placeholders for all columns (assuming the full row matches table schema).
     placeholders = ", ".join(["?"] * len(columns))
     insert_sql = f"INSERT INTO filtered_threads VALUES ({placeholders})"
-    con.executemany(insert_sql, valid_rows)
-    con.commit()
+    # Insert the valid rows into the filtered_threads table if any exist.
+    if valid_rows:
+        con.executemany(insert_sql, valid_rows)
+        con.commit()
     log_with_resources(f"Inserted {len(valid_rows)} valid rows into filtered_threads.")
