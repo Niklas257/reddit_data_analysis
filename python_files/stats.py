@@ -8,6 +8,8 @@ import datetime
 import re
 import concurrent.futures
 import duckdb
+import statistics
+import math
 
 
 # Get only tables that contain all the information (not only the ids)
@@ -187,6 +189,9 @@ def get_thread_score_distribution(table, con):
     """
     ).fetchall()
     columns = [col[0] for col in columns]
+    # Remove the 'posts' column if it exists
+    if "posts" in columns:
+        columns.remove("posts")
 
     # Build a SQL query that joins all relevant tables and calculates total scores in one go
     join_clauses = []
@@ -569,9 +574,18 @@ def calculate_weighted_average(table):
     if len(dictionary) == 0:
         print(f"No data found for {table}")
         return
-    weighted_average = sum(
-        int(key) * int(value) for key, value in dictionary.items()
-    ) / sum(dictionary.values())
+    if "depth" in table:
+        weighted_average = sum(
+            idx * int(value) for idx, (key, value) in enumerate(dictionary.items())
+        ) / (sum(v for v in dictionary.values() if v > 0) + 1e-4)
+    elif "score" in table:
+        weighted_average = sum(
+            int(key) * int(value) for key, value in dictionary.items()
+        ) / (sum(dictionary.values()) + 1e-4)
+    else:
+        weighted_average = sum(
+            int(key) * int(value) for key, value in dictionary.items()
+        ) / (sum(v for v in dictionary.values() if v > 0) + 1e-4)
     # Save to file with the appropriate key
     # Read the existing data first
     try:
@@ -588,6 +602,78 @@ def calculate_weighted_average(table):
         json.dump(existing_data, f)
 
     log_with_resources(f"Weighted average for {table} calculated and saved to file")
+
+
+def calculate_variance(table):
+    with open("../data/saved_stats.json", "r") as f:
+        data = json.load(f)
+        dictionary = data.get(table, {})
+
+    if len(dictionary) == 0:
+        print(f"No data found for {table}")
+        return
+
+    variance = {}
+    keys = [key for key in dictionary.keys()]
+
+    # Calculate frequencies (weights) and expand the dataset for percentiles
+    expanded_data = []
+    for key in keys:
+        count = dictionary[key]
+        if count > 0:
+            expanded_data.extend([key] * count)  # Repeat key 'count' times
+
+    # Compute Q1, Q2, Q3, and IQR
+    q1 = expanded_data[math.ceil(0.25 * len(expanded_data) - 1)]
+    try:
+        q2 = (
+            (
+                int(expanded_data[int(0.5 * len(expanded_data) - 1)])
+                + int(expanded_data[int(0.5 * len(expanded_data))])
+            )
+            / 2
+            if len(expanded_data) % 2 == 0
+            else expanded_data[int(0.5 * len(expanded_data))]
+        )
+    except ValueError:
+        q2 = (
+            f"Median between {expanded_data[int(0.5 * len(expanded_data) - 1)]} and {expanded_data[int(0.5 * len(expanded_data))]}"
+            if (
+                len(expanded_data) % 2 == 0
+                and (
+                    expanded_data[int(0.5 * len(expanded_data) - 1)]
+                    != expanded_data[int(0.5 * len(expanded_data))]
+                )
+            )
+            else expanded_data[int(0.5 * len(expanded_data))]
+        )
+    q3 = expanded_data[math.ceil(0.75 * len(expanded_data) - 1)]
+    # If q3 and q1 can be cast to int, caluculate iqr
+    try:
+        q1 = int(q1)
+        q3 = int(q3)
+        iqr = int(q3 - q1)
+    except ValueError:
+        iqr = f"{q3} - {q1}"
+
+    variance["Q1"] = q1
+    variance["Q2"] = q2
+    variance["Q3"] = q3
+    variance["IQR"] = iqr
+
+    try:
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_data = {}
+    # Add the new data to the existing dictionary
+    existing_data[f"{table}_variance"] = variance
+
+    # Write the updated dictionary back to the file
+    with open("../data/saved_stats.json", "w") as f:
+        json.dump(existing_data, f)
+
+    log_with_resources(f"Variance for {table} calculated and saved to file")
 
 
 def get_thread_lengths(table, con):

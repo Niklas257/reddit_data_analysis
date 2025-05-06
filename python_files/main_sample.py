@@ -23,7 +23,7 @@ from stats import (
     log_with_resources,
 )
 
-from filter_database import make_threads_unique, filter_threads
+from filter_database import make_threads_unique, filter_threads, filter_by_score
 
 monitoring_active = True
 max_workers = 90
@@ -50,7 +50,7 @@ con.execute("PRAGMA memory_limit='500GB';")
 log_with_resources("threads set to 96")
 """
 add_initial_tables(con, "../data/posts.csv", "../data/comments.csv")
-add_comments_to_comments_tables_old(con, "../data/comments.csv")"""
+add_comments_to_comments_tables_old(con, "../data/comments.csv")
 for table in con.execute("SHOW TABLES").fetchdf()["name"]:
     print(f"Table: {table}")
     print(con.execute(f"SELECT COUNT(*) FROM {table}").fetchdf())
@@ -92,26 +92,53 @@ create_row_counts_table(con)
 create_lookup_table(con)
 create_threads_table(con=con, threads_table="all_threads")
 
+make_threads_unique(con, "threads")"""
+
+create_row_counts_table(con)
 table_stats("lookup_table", con)
 calculate_weighted_average("thread_lengths_lookup_table")
 calculate_weighted_average("thread_widths_lookup_table")
 calculate_weighted_average("all_widths_lookup_table")
 
-make_threads_unique(con, "threads")
-filter_threads(con, "threads", 3)
+filter_threads(con, "threads", "threads", num_authors=None)
 
 get_depth_distribution("threads", con)
-get_depth_distribution("filtered_threads", con)
 get_thread_lengths("threads", con)
-get_thread_lengths("filtered_threads", con)
 get_number_of_threads("threads", con)
-get_number_of_threads("filtered_threads", con)
 get_thread_score_distribution("threads", con)
-get_thread_score_distribution("filtered_threads", con)
 get_subreddit_distribution("threads", con)
-get_subreddit_distribution("filtered_threads", con)
 get_author_distribution("threads", con)
-get_author_distribution("filtered_threads", con)
+calculate_weighted_average("depth_distribution_threads")
+calculate_weighted_average("author_distribution_threads")
+calculate_weighted_average("thread_score_distribution_threads")
+calculate_weighted_average("thread_lengths_threads")
+
+# Create subsets with 2,3,4,5 authors
+filter_threads(con, "threads", "threads_2_authors", num_authors=2)
+filter_threads(con, "threads", "threads_3_authors", num_authors=3)
+filter_threads(con, "threads", "threads_4_authors", num_authors=4)
+filter_threads(con, "threads", "threads_5_authors", num_authors=5)
+for i in range(2, 6):
+    get_depth_distribution(f"threads_{i}_authors", con)
+    get_thread_lengths(f"threads_{i}_authors", con)
+    get_number_of_threads(f"threads_{i}_authors", con)
+    get_thread_score_distribution(f"threads_{i}_authors", con)
+    get_subreddit_distribution(f"threads_{i}_authors", con)
+    calculate_weighted_average(f"depth_distribution_threads_{i}_authors")
+    calculate_weighted_average(f"thread_score_distribution_threads_{i}_authors")
+    calculate_weighted_average(f"thread_lengths_threads_{i}_authors")
+
+filter_by_score(con, "threads")
+for table in ["threads_viral", "threads_non_viral"]:
+    get_depth_distribution(table, con)
+    get_thread_lengths(table, con)
+    get_number_of_threads(table, con)
+    get_thread_score_distribution(table, con)
+    get_subreddit_distribution(table, con)
+    calculate_weighted_average(f"depth_distribution_{table}")
+    calculate_weighted_average(f"author_distribution_{table}")
+    calculate_weighted_average(f"thread_score_distribution_{table}")
+    calculate_weighted_average(f"thread_lengths_{table}")
 
 with open("../data/saved_stats.json", "r") as f:
     existing_data = json.load(f)
@@ -127,15 +154,14 @@ for subreddit in subreddits:
     calculate_weighted_average(f"thread_widths_{subreddit}_lookup")
     calculate_weighted_average(f"all_widths_{subreddit}_lookup")
     get_depth_distribution(f"{subreddit}_threads", con)
-    get_depth_distribution(f"filtered_{subreddit}_threads", con)
     get_thread_lengths(f"{subreddit}_threads", con)
-    get_thread_lengths(f"filtered_{subreddit}_threads", con)
     get_number_of_threads(f"{subreddit}_threads", con)
-    get_number_of_threads(f"filtered_{subreddit}_threads", con)
     get_thread_score_distribution(f"{subreddit}_threads", con)
-    get_thread_score_distribution(f"filtered_{subreddit}_threads", con)
     get_author_distribution(f"{subreddit}_threads", con)
-    get_author_distribution(f"filtered_{subreddit}_threads", con)
+    calculate_weighted_average(f"depth_distribution_{subreddit}_threads")
+    calculate_weighted_average(f"author_distribution_{subreddit}_threads")
+    calculate_weighted_average(f"thread_score_distribution_{subreddit}_threads")
+    calculate_weighted_average(f"thread_lengths_{subreddit}_threads")
 
 
 monitoring_active = False

@@ -424,8 +424,12 @@ def sort_key(t):
     elif t == "comments_to_posts":
         return (1, 0)
     else:
-        num = int(re.search(r"comments_to_comments_(\d+)", t).group(1))
-        return (2, num)
+        match = re.search(r"comments_to_comments_(\d+)", t)
+        if match:
+            num = int(match.group(1))
+            return (2, num)
+        # If the table name doesn't match any expected pattern, put it at the front
+        return (-1, 0)
 
 
 # Create lookup table
@@ -582,14 +586,6 @@ def create_subreddit_tables(con, subreddit):
     CREATE TABLE IF NOT EXISTS {subreddit}_threads AS
     SELECT *
     FROM threads
-    WHERE posts IN (SELECT id FROM {subreddit}_ids)
-    """
-    con.execute(query)
-
-    query = f"""
-    CREATE TABLE IF NOT EXISTS filtered_{subreddit}_threads AS
-    SELECT *
-    FROM filtered_threads
     WHERE posts IN (SELECT id FROM {subreddit}_ids)
     """
     con.execute(query)
