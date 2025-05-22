@@ -432,63 +432,6 @@ def sort_key(t):
         return (-1, 0)
 
 
-# Create lookup table
-def create_lookup_table_old(con):
-    # Retrieve list of tables from the main schema.
-    tables = con.execute(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
-    ).fetchall()
-
-    valid_tables = filter_valid_tables(tables)
-    valid_tables.sort(key=sort_key)
-
-    # Build subqueries for each descendant level that aggregate ids by post.
-    # Note: valid_tables[0] is "posts", so we start from index 1.
-    subqueries = []
-    for i in range(1, len(valid_tables)):
-        table_name = valid_tables[i]
-        join_clause = "FROM posts p\n"
-        # Build join chain: for level i, join tables[1] ... tables[i]
-        for j in range(1, i + 1):
-            alias = f"t{j}"
-            parent_alias = "p" if j == 1 else f"t{j-1}"
-            current_table = valid_tables[j]
-            join_clause += f"JOIN {current_table} {alias} ON {alias}.parent_id = {parent_alias}.id\n"
-        # Aggregate the ids from the last table in the chain.
-        subquery = (
-            f"SELECT p.id as post_id, array_agg(t{i}.id) as {table_name}\n"
-            f"{join_clause}GROUP BY p.id"
-        )
-        subqueries.append((table_name, subquery))
-
-    # Materialize each subquery into a temporary table.
-    for table_name, subquery in subqueries:
-        temp_sql = f"CREATE TEMP TABLE temp_{table_name} AS\n{subquery}"
-        con.execute(temp_sql)
-        con.commit()
-
-    # Build the final lookup table by joining the temporary tables.
-    final_sql = "CREATE TABLE lookup_table AS\nSELECT p.id as posts"
-    for table_name, _ in subqueries:
-        final_sql += f", temp_{table_name}.{table_name}"
-    final_sql += "\nFROM posts p\n"
-    for table_name, _ in subqueries:
-        final_sql += (
-            f"LEFT JOIN temp_{table_name} ON temp_{table_name}.post_id = p.id\n"
-        )
-
-    con.execute(final_sql)
-    con.commit()
-    log_with_resources("lookup_table created successfully.")
-
-    # Clean up: drop the temporary tables as they are no longer needed.
-    for table_name, _ in subqueries:
-        drop_sql = f"DROP TABLE IF EXISTS temp_{table_name}"
-        con.execute(drop_sql)
-        con.commit()
-        log_with_resources(f"Temp table {table_name} dropped")
-
-
 def create_lookup_table(con):
     # Retrieve list of tables from the main schema.
     tables = con.execute(
@@ -567,7 +510,7 @@ def create_lookup_table(con):
 
 def create_subreddit_tables(con, subreddit):
     query = f"""
-    CREATE TABLE IF NOT EXISTS {subreddit}_ids AS
+    CREATE OR REPLACE TABLE {subreddit}_ids AS
     SELECT id
     FROM posts
     WHERE subreddit = '{subreddit}'
@@ -575,7 +518,7 @@ def create_subreddit_tables(con, subreddit):
     con.execute(query)
 
     query = f"""
-    CREATE TABLE IF NOT EXISTS {subreddit}_lookup AS
+    CREATE OR REPLACE TABLE {subreddit}_lookup AS
     SELECT *
     FROM lookup_table
     WHERE posts IN (SELECT id FROM {subreddit}_ids)
@@ -583,7 +526,7 @@ def create_subreddit_tables(con, subreddit):
     con.execute(query)
 
     query = f"""
-    CREATE TABLE IF NOT EXISTS {subreddit}_threads AS
+    CREATE OR REPLACE TABLE {subreddit}_threads AS
     SELECT *
     FROM threads
     WHERE posts IN (SELECT id FROM {subreddit}_ids)
@@ -654,157 +597,3 @@ def create_threads_table(con, threads_table):
         con.execute(final_query)
 
     log_with_resources(f"Created {threads_table} table successfully.")
-
-
-def process_depth_query(query, db_path):
-    """
-    Open a new connection, execute the provided query,
-    fetch all results, and return them.
-    """
-    con_worker = duckdb.connect(db_path)
-    try:
-        results = con_worker.execute(query).fetchall()
-    except Exception as e:
-        print(f"Error in query execution: {e}")
-        results = []
-    finally:
-        con_worker.close()
-    return results
-
-
-def create_threads_table_parallel(con, threads_table, max_workers=None, batch_size=5):
-    """Create threads table with parallel query execution with safeguards
-
-    Args:
-        con: DuckDB connection
-        threads_table: Name of the output table
-        max_workers: Number of parallel workers
-        batch_size: Process depths in smaller batches to control memory usage
-    """
-    # Use fewer threads to avoid overwhelming the system
-    cpu_count = os.cpu_count()
-    if max_workers is None:
-        # More conservative initial setting
-        max_workers = min(24, cpu_count // 4)
-
-    # Configure DuckDB with fewer threads initially
-    con.execute(f"SET threads TO {cpu_count // 2};")
-    log_with_resources(f"DuckDB thread count set to {cpu_count // 2}")
-
-    # Get column information
-    columns = con.execute(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
-    ).fetchall()
-    columns = filter_valid_tables(columns)
-    columns.sort(key=sort_key)
-
-    # Create the target table
-    create_table_sql = f"""
-    CREATE OR REPLACE TABLE {threads_table} (
-        {', '.join(f'{col} VARCHAR' for col in columns)}
-    )"""
-    con.execute(create_table_sql)
-    log_with_resources(f"Created empty table {threads_table}")
-
-    # Use thread-local storage for connection management
-    import threading
-
-    threading.local()
-
-    # Function that processes a depth with proper connection management
-    def process_depth(depth):
-        try:
-            # Determine the starting table name based on depth
-            if depth == 0:
-                starting_table = "posts"
-            elif depth == 1:
-                starting_table = "comments_to_posts"
-            else:
-                starting_table = f"comments_to_comments_{depth - 1}"
-
-            # Generate query as before...
-            join_clauses = []
-            for current_depth in range(depth, 0, -1):
-                parent_depth = current_depth - 1
-                if parent_depth == 0:
-                    parent_table = "posts"
-                elif parent_depth == 1:
-                    parent_table = "comments_to_posts"
-                else:
-                    parent_table = f"comments_to_comments_{parent_depth - 1}"
-                join_clauses.append(
-                    f"LEFT JOIN {parent_table} AS t{parent_depth} "
-                    f"ON t{current_depth}.parent_id = t{parent_depth}.id"
-                )
-
-            select_parts = []
-            for idx, col in enumerate(columns):
-                if idx > depth:
-                    select_parts.append(f"NULL AS {col}")
-                else:
-                    select_parts.append(f"t{idx}.id AS {col}")
-
-            # Construct the SQL query for this depth
-            query = f"""
-            INSERT INTO {threads_table}
-            SELECT {', '.join(select_parts)}
-            FROM {starting_table} AS t{depth}
-            {' '.join(join_clauses)}
-            """
-
-            # Acquire a lock to use the shared connection safely
-            # This is less parallel but avoids connection conflicts
-            with connection_lock:
-                con.execute(query)
-
-            log_with_resources(f"Completed processing depth {depth}")
-            return f"Successfully processed depth {depth}"
-        except Exception as e:
-            log_with_resources(f"Error processing depth {depth}: {str(e)}")
-            raise
-
-    # Create a lock for connection access
-    connection_lock = threading.Lock()
-
-    # Process in smaller batches to control memory usage
-    all_depths = list(range(len(columns) - 1, -1, -1))
-
-    log_with_resources(
-        f"Starting parallel execution with {max_workers} workers in batches of {batch_size}"
-    )
-
-    # Process in smaller batches to control memory usage
-    for i in range(0, len(all_depths), batch_size):
-        batch_depths = all_depths[i : i + batch_size]
-        log_with_resources(
-            f"Processing batch {i//batch_size + 1}: depths {batch_depths}"
-        )
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit batch tasks
-            future_to_depth = {
-                executor.submit(process_depth, depth): depth for depth in batch_depths
-            }
-
-            # Process results as they complete
-            for future in as_completed(future_to_depth):
-                depth = future_to_depth[future]
-                try:
-                    result = future.result()
-                    log_with_resources(result)
-                except Exception as e:
-                    log_with_resources(
-                        f"Depth {depth} generated an exception: {str(e)}"
-                    )
-
-        # Force garbage collection between batches
-        import gc
-
-        gc.collect()
-
-    # Get statistics for the created table
-    table_stats = con.execute(f"SELECT COUNT(*) FROM {threads_table}").fetchone()[0]
-    log_with_resources(f"Created {threads_table} with {table_stats} rows")
-
-    # Run ANALYZE to update statistics
-    con.execute(f"ANALYZE {threads_table}")
