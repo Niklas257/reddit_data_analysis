@@ -1,10 +1,7 @@
 import re
 import pandas as pd
 import gc
-import os
-import duckdb
 from stats import log_with_resources
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # Add initial tables to the database

@@ -3,19 +3,12 @@ import json
 import threading
 import time
 from create_database import (
-    add_initial_tables,
-    add_comments_to_comments_tables_old,
-    cascading_comment_deletion,
-    create_lookup_table,
     create_subreddit_tables,
-    create_threads_table,
 )
 from stats import (
-    create_row_counts_table,
     get_depth_distribution,
     get_number_of_threads,
     get_thread_score_distribution,
-    get_subreddit_distribution,
     table_stats,
     calculate_weighted_average,
     get_thread_lengths,
@@ -23,8 +16,6 @@ from stats import (
     log_with_resources,
     calculate_variance,
 )
-
-from filter_database import make_threads_unique, filter_threads
 
 monitoring_active = True
 max_workers = 90

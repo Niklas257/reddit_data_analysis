@@ -6,9 +6,6 @@ import os
 import psutil
 import datetime
 import re
-import concurrent.futures
-import duckdb
-import statistics
 import math
 
 

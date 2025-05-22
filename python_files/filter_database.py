@@ -1,6 +1,4 @@
 from stats import log_with_resources
-import concurrent.futures
-import duckdb
 
 
 def make_threads_unique(con, filtered_table):
