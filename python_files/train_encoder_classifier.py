@@ -2,7 +2,6 @@ import json
 import pandas as pd
 from sklearn.metrics import precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
-from sklearn.utils import resample  # Used for random oversampling
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import (
@@ -13,13 +12,17 @@ import numpy as np
 import random
 import os
 import torch.nn as nn
+from collections import Counter
+import torch._dynamo
+
+torch._dynamo.config.suppress_errors = True
 
 # --- Configuration ---
-MODEL_NAME = "allenai/longformer-base-4096"
-MAX_LEN = 4096  # Maximum token length for Longformer
-BATCH_SIZE = 8
+MODEL_NAME = "answerdotai/ModernBERT-base"
+MAX_LEN = 4096
+BATCH_SIZE = 16
 LEARNING_RATE = 2e-5
-EPOCHS = 10
+EPOCHS = 15
 RANDOM_SEED = 42
 EARLY_STOPPING_PATIENCE = 3
 PERFORMANCE_FILE = "../data/model_performance.json"  # Define performance file path
@@ -31,12 +34,13 @@ np.random.seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+torch.set_float32_matmul_precision("high")
 
 # Set device (GPU if available, else CPU)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# --- Helper Functions ---
+# --- Helper Functions (No changes needed for these) ---
 
 
 def load_jsonl(file_path, tokenizer, max_len):
@@ -61,12 +65,9 @@ def load_jsonl(file_path, tokenizer, max_len):
         f"Initially loaded {initial_count} entries from {os.path.basename(file_path)}."
     )
 
-    # Calculate token lengths and filter
     print(
         f"Filtering entries longer than {max_len} tokens in {os.path.basename(file_path)}..."
     )
-    # This might be slow for very large datasets and large MAX_LEN
-    # Consider batching tokenization for performance if needed in actual use.
     token_lengths = [
         len(
             tokenizer.encode_plus(str(text), add_special_tokens=True, truncation=False)[
@@ -90,7 +91,6 @@ def load_jsonl(file_path, tokenizer, max_len):
     return df_filtered.drop(columns=["token_length"])
 
 
-# --- Custom PyTorch Dataset ---
 class CommentDataset(Dataset):
     """
     A custom PyTorch Dataset for handling text and labels for classification.
@@ -129,15 +129,12 @@ class CommentDataset(Dataset):
         }
 
 
-# --- Training and Evaluation Functions ---
-
-
 def train_epoch(
     model,
     train_data_loader,
-    dev_data_loader,
+    val_data_loader,  # Kept for in-epoch evaluation
     optimizer,
-    scheduler,
+    # Removed scheduler from here
     device,
     epoch,
     total_epochs,
@@ -152,9 +149,9 @@ def train_epoch(
     # Store metrics for plotting later
     train_losses_batch = []
     train_accuracies_batch = []
-    dev_losses_batch = []
-    dev_accuracies_batch = []
-    dev_f1_batch = []
+    val_losses_batch = []
+    val_accuracies_batch = []
+    val_f1_batch = []
 
     # Keep track of total samples processed for accurate in-epoch accuracy
     total_samples_processed_in_epoch = 0
@@ -164,6 +161,7 @@ def train_epoch(
         weight=class_weights.to(device) if class_weights is not None else None
     )
 
+    print("Step    | Train Loss | Train Acc | Val Loss | Val Acc | Val F1")
     for step, batch in enumerate(train_data_loader):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
@@ -185,25 +183,24 @@ def train_epoch(
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        scheduler.step()
+        # >>> CRUCIAL CHANGE: REMOVED scheduler.step() from here <<<
         optimizer.zero_grad()
 
-        # In-epoch evaluation
+        # In-epoch evaluation (kept as per your request)
         if (step + 1) % eval_every_steps == 0 or step == len(train_data_loader) - 1:
-            print(
-                f"  Epoch {epoch + 1}/{total_epochs} | Step {step + 1}/{len(train_data_loader)} - Train Loss: {np.mean(losses[-eval_every_steps:]):.4f}"
-            )
 
-            # Evaluate on development set
-            dev_loss, dev_acc, dev_precision, dev_recall, dev_f1, _, _ = evaluate_model(
+            # Evaluate on validation set
+            val_loss, val_acc, val_precision, val_recall, val_f1, _, _ = evaluate_model(
                 model,
-                dev_data_loader,
+                val_data_loader,
                 device,
                 class_weights,
             )
 
             print(
-                f"    -> Dev Loss: {dev_loss:.4f}, Dev Accuracy: {dev_acc:.4f}, Dev F1-score: {dev_f1:.4f}"
+                f"{step + 1:03d}/{len(train_data_loader)} | {np.mean(losses[-eval_every_steps:]):.4f}     | "
+                f"{(correct_predictions.double() / total_samples_processed_in_epoch).item():.4f}    | "
+                f"{val_loss:.4f}   | {val_acc:.4f}  | {val_f1:.4f}"
             )
 
             train_losses_batch.append(np.mean(losses))
@@ -212,21 +209,22 @@ def train_epoch(
                 (correct_predictions.double() / total_samples_processed_in_epoch).item()
             )
 
-            dev_losses_batch.append(dev_loss)
-            dev_accuracies_batch.append(dev_acc.item())
-            dev_f1_batch.append(dev_f1)
+            val_losses_batch.append(val_loss)
+            val_accuracies_batch.append(val_acc.item())
+            val_f1_batch.append(val_f1)
 
-            model.train()
+            model.train()  # Set model back to train mode after validation
 
     # Return epoch-level averages for summary, and lists for plotting
     return (
         np.mean(losses),
-        correct_predictions.double() / len(train_data_loader.dataset),
+        correct_predictions.double()
+        / len(train_data_loader.dataset),  # This should be over total dataset size
         train_losses_batch,
         train_accuracies_batch,
-        dev_losses_batch,
-        dev_accuracies_batch,
-        dev_f1_batch,
+        val_losses_batch,
+        val_accuracies_batch,
+        val_f1_batch,
     )
 
 
@@ -272,7 +270,7 @@ def evaluate_model(model, data_loader, device, class_weights=None):
     return avg_loss, accuracy, precision, recall, f1, all_labels, all_preds
 
 
-# --- Main Script ---
+# --- Main Script (Modified for Scheduler) ---
 
 
 def training():
@@ -318,104 +316,70 @@ def training():
         f"IAC test data: {len(df_test_iac)} samples (Label distribution: {df_test_iac['label'].value_counts().to_dict()})."
     )
 
-    # --- Balance IAC Training/Validation Data using Random Oversampling ---
-    # Note: For true SMOTE (Synthetic Minority Over-sampling Technique),
-    # you would typically need to vectorize text (e.g., using embeddings)
-    # before applying SMOTE, as it operates on numerical features.
-    # This implementation uses random oversampling (duplicating existing samples
-    # from the minority class) as a simpler and common approach to balance
-    # text datasets directly within a DataFrame.
-    print("\n--- Balancing IAC Training/Validation Data ---")
-    df_iac_minority = df_iac_train_val[df_iac_train_val["label"] == 0]
-    df_iac_majority = df_iac_train_val[df_iac_train_val["label"] == 1]
-
-    if (
-        len(df_iac_minority) > 0
-        and len(df_iac_majority) > 0
-        and len(df_iac_minority) < len(df_iac_majority)
-    ):
-        # Oversample minority class to match majority class count
-        df_iac_minority_oversampled = resample(
-            df_iac_minority,
-            replace=True,
-            n_samples=len(df_iac_majority),
-            random_state=RANDOM_SEED,
-        )
-        df_iac_train_val_balanced = pd.concat(
-            [df_iac_majority, df_iac_minority_oversampled]
-        )
-        print(
-            f"IAC after random oversampling: {len(df_iac_train_val_balanced)} samples."
-        )
-        print("IAC balanced training/validation label distribution:")
-        print(df_iac_train_val_balanced["label"].value_counts().to_dict())
-    else:
-        df_iac_train_val_balanced = df_iac_train_val
-        print(
-            "IAC is already balanced or minority class is not less than majority, no oversampling applied."
-        )
-        print("IAC training/validation label distribution:")
-        print(df_iac_train_val_balanced["label"].value_counts().to_dict())
-
-    # --- Combine YNACC and Balanced IAC Data for Unified Training/Validation ---
+    # --- Combine All Training/Validation Data ---
     df_combined_train_val = (
-        pd.concat([df_ynacc_train_val, df_iac_train_val_balanced])
+        pd.concat([df_ynacc_train_val, df_iac_train_val])
         .sample(frac=1, random_state=RANDOM_SEED)
         .reset_index(drop=True)
     )
 
     print(
-        f"\nCombined training/validation data size: {len(df_combined_train_val)} samples."
+        f"\nCombined training/validation data size (before split): {len(df_combined_train_val)} samples."
     )
-    print("Combined training/validation data label distribution:")
+    print("Combined training/validation data label distribution (before split):")
     print(df_combined_train_val["label"].value_counts().to_dict())
 
-    # Calculate class weights for the combined training/validation set
-    class_counts = df_combined_train_val["label"].value_counts().sort_index()
+    # --- Split Combined Data into Training and Validation Sets (20% for validation) ---
+    print("\n--- Splitting Combined Data into Train and Validation ---")
+    val_size = 0.2
+
+    if len(df_combined_train_val) < 2:
+        print(
+            f"Warning: Not enough combined data ({len(df_combined_train_val)}) for a stratified split. Skipping validation split and using all for training."
+        )
+        df_train = df_combined_train_val
+        df_val = pd.DataFrame()
+    else:
+        df_train, df_val = train_test_split(
+            df_combined_train_val,
+            test_size=val_size,
+            random_state=RANDOM_SEED,
+            stratify=df_combined_train_val["label"],
+        )
+
+    print(f"Final Training entries: {len(df_train)} samples.")
+    print(f"Final Validation entries: {len(df_val)} samples.")
+    print("Training data label distribution:")
+    print(df_train["label"].value_counts().to_dict())
+    print("Validation data label distribution:")
+    print(df_val["label"].value_counts().to_dict())
+
+    # --- Calculate Class Weights for the Training Set ---
+    print("\n--- Calculating Class Weights ---")
+    train_labels = df_train["label"].tolist()
+    class_counts = Counter(train_labels)
     num_classes = len(class_counts)
+
     if num_classes > 0:
-        total_samples = sum(class_counts)
-        # Weights are inversely proportional to class frequencies to give more importance to underrepresented classes
-        weights = [total_samples / (num_classes * count) for count in class_counts]
+        sorted_class_counts = sorted(class_counts.items())
+        total_samples = sum(count for _, count in sorted_class_counts)
+        weights = [
+            total_samples / (num_classes * count) for _, count in sorted_class_counts
+        ]
         class_weights = torch.tensor(weights, dtype=torch.float)
         print(
-            f"Calculated Class Weights for combined training/validation: {class_weights.tolist()}"
+            f"Calculated Class Weights (based on training data): {class_weights.tolist()}"
         )
     else:
         class_weights = None
         print(
-            "Warning: Cannot calculate class weights (no classes found in combined data)."
+            "Warning: Cannot calculate class weights (no classes found in training data)."
         )
-
-    # --- Split Combined Data into Training and Development (Validation) Sets ---
-    # User wants 100 samples for evaluation (dev set) from the combined, balanced dataset
-    # Ensure there's enough data for 100 samples and stratify the split
-    dev_test_size = 100
-    if len(df_combined_train_val) <= dev_test_size:
-        print(
-            f"Warning: Not enough combined data ({len(df_combined_train_val)}) to create a {dev_test_size}-sample dev set. Adjusting test_size to 0.1 of available data."
-        )
-        df_train, df_dev = train_test_split(
-            df_combined_train_val,
-            test_size=0.1,
-            random_state=RANDOM_SEED,
-            stratify=df_combined_train_val["label"],
-        )
-    else:
-        df_train, df_dev = train_test_split(
-            df_combined_train_val,
-            test_size=dev_test_size,
-            random_state=RANDOM_SEED,
-            stratify=df_combined_train_val["label"],
-        )
-
-    print(f"\nFinal Training entries: {len(df_train)} samples.")
-    print(f"Final Development (Validation) entries: {len(df_dev)} samples.")
 
     # Final check for empty splits
     if (
         len(df_train) == 0
-        or len(df_dev) == 0
+        or len(df_val) == 0
         or len(df_test_ynacc) == 0
         or len(df_test_iac) == 0
     ):
@@ -429,8 +393,8 @@ def training():
     train_dataset = CommentDataset(
         df_train["text"].tolist(), df_train["label"].tolist(), tokenizer, MAX_LEN
     )
-    dev_dataset = CommentDataset(
-        df_dev["text"].tolist(), df_dev["label"].tolist(), tokenizer, MAX_LEN
+    val_dataset = CommentDataset(
+        df_val["text"].tolist(), df_val["label"].tolist(), tokenizer, MAX_LEN
     )
     test_ynacc_dataset = CommentDataset(
         df_test_ynacc["text"].tolist(),
@@ -443,12 +407,12 @@ def training():
     )
 
     train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    dev_dataloader = DataLoader(dev_dataset, batch_size=BATCH_SIZE)
+    val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
     test_ynacc_dataloader = DataLoader(test_ynacc_dataset, batch_size=BATCH_SIZE)
     test_iac_dataloader = DataLoader(test_iac_dataset, batch_size=BATCH_SIZE)
 
     print(f"Train DataLoader batches: {len(train_dataloader)}")
-    print(f"Dev DataLoader batches: {len(dev_dataloader)}")
+    print(f"Dev DataLoader batches: {len(val_dataloader)}")
     print(f"YNACC Test DataLoader batches: {len(test_ynacc_dataloader)}")
     print(f"IAC Test DataLoader batches: {len(test_iac_dataloader)}")
 
@@ -457,24 +421,27 @@ def training():
     model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    # Scheduler patience set to EARLY_STOPPING_PATIENCE - 1 as a common practice
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", patience=2, verbose=True
+        optimizer, mode="min", patience=EARLY_STOPPING_PATIENCE - 1
     )
 
     # Lists to store metrics for saving
     train_losses_per_epoch = []
-    dev_losses_per_epoch = []
+    val_losses_per_epoch = []
     train_accuracies_per_epoch = []
-    dev_accuracies_per_epoch = []
+    val_accuracies_per_epoch = []
+    val_f1s_per_epoch = []  # Track F1 per epoch for scheduler and early stopping
 
-    train_losses_per_batch_step = []
-    train_accuracies_per_batch_step = []
-    dev_losses_per_batch_step = []
-    dev_accuracies_per_batch_step = []
-    dev_f1_per_batch_step = []
+    # In-epoch batch metrics (will be collected from train_epoch's return)
+    in_epoch_train_losses_batch = []
+    in_epoch_train_accuracies_batch = []
+    in_epoch_val_losses_batch = []
+    in_epoch_val_accuracies_batch = []
+    in_epoch_val_f1_batch = []
 
     print("\n--- Starting Training Loop ---")
-    best_dev_f1 = -1
+    best_val_f1 = -1
     epochs_no_improve = 0
     model_save_path = None
 
@@ -486,15 +453,14 @@ def training():
             current_train_acc,
             batch_train_losses,
             batch_train_accuracies,
-            batch_dev_losses,
-            batch_dev_accuracies,
-            batch_dev_f1s,
+            batch_val_losses,
+            batch_val_accuracies,
+            batch_val_f1s,
         ) = train_epoch(
             model,
             train_dataloader,
-            dev_dataloader,
+            val_dataloader,  # Passed for in-epoch logging
             optimizer,
-            scheduler,
             device,
             epoch,
             EPOCHS,
@@ -504,32 +470,40 @@ def training():
         train_losses_per_epoch.append(current_train_loss)
         train_accuracies_per_epoch.append(current_train_acc.item())
 
-        train_losses_per_batch_step.extend(batch_train_losses)
-        train_accuracies_per_batch_step.extend(batch_train_accuracies)
-        dev_losses_per_batch_step.extend(batch_dev_losses)
-        dev_accuracies_per_batch_step.extend(batch_dev_accuracies)
-        dev_f1_per_batch_step.extend(batch_dev_f1s)
+        # Collect in-epoch batch metrics for plotting
+        in_epoch_train_losses_batch.extend(batch_train_losses)
+        in_epoch_train_accuracies_batch.extend(batch_train_accuracies)
+        in_epoch_val_losses_batch.extend(batch_val_losses)
+        in_epoch_val_accuracies_batch.extend(batch_val_accuracies)
+        in_epoch_val_f1_batch.extend(batch_val_f1s)
 
-        current_dev_loss, current_dev_acc, dev_precision, dev_recall, dev_f1, _, _ = (
-            evaluate_model(model, dev_dataloader, device, class_weights)
+        # --- Perform full validation at the end of the epoch ---
+        current_val_loss, current_val_acc, val_precision, val_recall, val_f1, _, _ = (
+            evaluate_model(model, val_dataloader, device, class_weights)
         )
-        dev_losses_per_epoch.append(current_dev_loss)
-        dev_accuracies_per_epoch.append(current_dev_acc.item())
+        val_losses_per_epoch.append(current_val_loss)
+        val_accuracies_per_epoch.append(current_val_acc.item())
+        val_f1s_per_epoch.append(val_f1)  # Store for scheduler and early stopping
 
         print(
             f"\nEpoch {epoch + 1} Summary - Train Loss: {current_train_loss:.4f}, Train Acc: {current_train_acc:.4f}"
         )
         print(
-            f"Epoch {epoch + 1} Summary - Dev Loss: {current_dev_loss:.4f}, Dev Acc: {current_dev_acc:.4f}, Dev Precision: {dev_precision:.4f}, Dev Recall: {dev_recall:.4f}, Dev F1-score: {dev_f1:.4f}"
+            f"Epoch {epoch + 1} Summary - Dev Loss: {current_val_loss:.4f}, Dev Acc: {current_val_acc:.4f}, Dev Precision: {val_precision:.4f}, Dev Recall: {val_recall:.4f}, Dev F1-score: {val_f1:.4f}"
         )
 
-        if dev_f1 > best_dev_f1:
-            best_dev_f1 = dev_f1
+        # --- Scheduler Step (THIS IS THE CRUCIAL, CORRECTED CHANGE) ---
+        # Step the scheduler based on the *full epoch's* validation F1 score
+        scheduler.step(current_val_loss)
+
+        # --- Early Stopping Logic ---
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
             epochs_no_improve = 0
-            model_save_path = f"best_longformer_classifier_epoch_{epoch+1}.pt"
+            model_save_path = f"best_modernbert_classifier_epoch_{epoch+1}.pt"
             torch.save(model.state_dict(), model_save_path)
             print(
-                f"Saved best model to {model_save_path} with Dev F1: {best_dev_f1:.4f}"
+                f"Saved best model to {model_save_path} with Dev F1: {best_val_f1:.4f}"
             )
         else:
             epochs_no_improve += 1
@@ -592,16 +566,17 @@ def training():
     performance_metrics = {
         "epoch_metrics": {
             "train_losses": train_losses_per_epoch,
-            "dev_losses": dev_losses_per_epoch,
+            "val_losses": val_losses_per_epoch,
             "train_accuracies": train_accuracies_per_epoch,
-            "dev_accuracies": dev_accuracies_per_epoch,
+            "val_accuracies": val_accuracies_per_epoch,
+            "val_f1_scores": val_f1s_per_epoch,  # Added epoch-level F1s
         },
         "in_epoch_batch_metrics": {
-            "train_losses": train_losses_per_batch_step,
-            "train_accuracies": train_accuracies_per_batch_step,
-            "dev_losses": dev_losses_per_batch_step,
-            "dev_accuracies": dev_accuracies_per_batch_step,
-            "dev_f1_scores": dev_f1_per_batch_step,
+            "train_losses": in_epoch_train_losses_batch,
+            "train_accuracies": in_epoch_train_accuracies_batch,
+            "val_losses": in_epoch_val_losses_batch,
+            "val_accuracies": in_epoch_val_accuracies_batch,
+            "val_f1_scores": in_epoch_val_f1_batch,
         },
         "final_test_results": {
             "ynacc": {
@@ -627,12 +602,14 @@ def training():
             "epochs": EPOCHS,
             "random_seed": RANDOM_SEED,
             "early_stopping_patience": EARLY_STOPPING_PATIENCE,
-            "final_best_dev_f1": best_dev_f1,
+            "final_best_val_f1": best_val_f1,
             "model_saved_path": model_save_path,
+            "class_weights_used": (
+                class_weights.tolist() if class_weights is not None else None
+            ),
         },
     }
 
-    # Create the directory if it doesn't exist
     os.makedirs(os.path.dirname(PERFORMANCE_FILE), exist_ok=True)
 
     with open(PERFORMANCE_FILE, "w") as f:
