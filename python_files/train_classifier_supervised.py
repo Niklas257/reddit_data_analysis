@@ -19,12 +19,12 @@ torch._dynamo.config.suppress_errors = True
 
 # --- Configuration ---
 MODEL_NAME = "answerdotai/ModernBERT-base"
-MAX_LEN = 512
-BATCH_SIZE = 8
+MAX_LEN = 4096
+BATCH_SIZE = 16
 LEARNING_RATE = 2e-6
-EPOCHS = 5
+EPOCHS = 15
 RANDOM_SEED = 42
-EARLY_STOPPING_PATIENCE = 3
+EARLY_STOPPING_PATIENCE = 5
 PERFORMANCE_FILE = "../data/model_performance.json"  # Define performance file path
 
 # Set random seeds for reproducibility across runs
@@ -102,6 +102,8 @@ class CommentDataset(Dataset):
         self.labels = labels
         self.tokenizer = tokenizer
         self.max_len = max_len
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def __len__(self):
         return len(self.texts)
@@ -274,8 +276,8 @@ def evaluate_model(model, data_loader, device, class_weights=None):
 
 
 def training():
-    ynacc_file_path = "/kaggle/input/ynacc-processed/ynacc_processed.jsonl"
-    iac_file_path = "/kaggle/input/iac-processed/iac_processed.jsonl"
+    ynacc_file_path = "../data/ynacc_processed.jsonl"
+    iac_file_path = "../data/iac_processed.jsonl"
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
@@ -331,7 +333,7 @@ def training():
 
     # --- Split Combined Data into Training and Validation Sets (20% for validation) ---
     print("\n--- Splitting Combined Data into Train and Validation ---")
-    val_size = 0.2
+    val_size = 100  # Fixed validation size of 100 samples
 
     if len(df_combined_train_val) < 2:
         print(
@@ -423,7 +425,7 @@ def training():
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
     # Scheduler patience set to EARLY_STOPPING_PATIENCE - 1 as a common practice
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=EARLY_STOPPING_PATIENCE - 1
+        optimizer, mode="min", patience=2
     )
 
     # Lists to store metrics for saving
@@ -431,7 +433,7 @@ def training():
     val_losses_per_epoch = []
     train_accuracies_per_epoch = []
     val_accuracies_per_epoch = []
-    val_f1s_per_epoch = []  # Track F1 per epoch for scheduler and early stopping
+    val_f1s_per_epoch = []
 
     # In-epoch batch metrics (will be collected from train_epoch's return)
     in_epoch_train_losses_batch = []
@@ -441,7 +443,7 @@ def training():
     in_epoch_val_f1_batch = []
 
     print("\n--- Starting Training Loop ---")
-    best_val_f1 = -1
+    best_val_loss = float("inf")
     epochs_no_improve = 0
     model_save_path = None
 
@@ -483,7 +485,7 @@ def training():
         )
         val_losses_per_epoch.append(current_val_loss)
         val_accuracies_per_epoch.append(current_val_acc.item())
-        val_f1s_per_epoch.append(val_f1)  # Store for scheduler and early stopping
+        val_f1s_per_epoch.append(val_f1)
 
         print(
             f"\nEpoch {epoch + 1} Summary - Train Loss: {current_train_loss:.4f}, Train Acc: {current_train_acc:.4f}"
@@ -493,21 +495,21 @@ def training():
         )
 
         # --- Scheduler Step (THIS IS THE CRUCIAL, CORRECTED CHANGE) ---
-        # Step the scheduler based on the *full epoch's* validation F1 score
+        # Step the scheduler based on the *full epoch's* validation loss
         scheduler.step(current_val_loss)
 
         # --- Early Stopping Logic ---
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
+        if current_val_loss < best_val_loss:
+            best_val_loss = current_val_loss
             epochs_no_improve = 0
             model_save_path = f"best_modernbert_classifier_epoch_{epoch+1}.pt"
             torch.save(model.state_dict(), model_save_path)
             print(
-                f"Saved best model to {model_save_path} with Dev F1: {best_val_f1:.4f}"
+                f"Saved best model to {model_save_path} with Dev Loss: {best_val_loss:.4f}"
             )
         else:
             epochs_no_improve += 1
-            print(f"No improvement in Dev F1 for {epochs_no_improve} epochs.")
+            print(f"No improvement in Dev Loss for {epochs_no_improve} epochs.")
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
                 print(f"Early stopping triggered after {epoch + 1} epochs.")
                 break
@@ -602,7 +604,7 @@ def training():
             "epochs": EPOCHS,
             "random_seed": RANDOM_SEED,
             "early_stopping_patience": EARLY_STOPPING_PATIENCE,
-            "final_best_val_f1": best_val_f1,
+            "final_best_val_loss": best_val_loss,
             "model_saved_path": model_save_path,
             "class_weights_used": (
                 class_weights.tolist() if class_weights is not None else None

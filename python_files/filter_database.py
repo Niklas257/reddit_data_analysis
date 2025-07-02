@@ -1,4 +1,7 @@
 from stats import log_with_resources
+from langdetect import detect
+import json
+import random
 
 
 def make_threads_unique(con, filtered_table):
@@ -46,7 +49,14 @@ def make_threads_unique(con, filtered_table):
     )
 
 
-def filter_threads(con, table_to_filter, new_table, num_authors=None):
+def filter_threads(
+    con,
+    table_to_filter,
+    new_table,
+    num_authors=None,
+    min_authors=False,
+    check_english=False,
+):
     # Get column names (excluding 'posts')
     columns = con.execute(
         f"""
@@ -84,12 +94,26 @@ def filter_threads(con, table_to_filter, new_table, num_authors=None):
         for id, author, body in comments_data:
             id_to_author[id] = author
             # Check if any content is [deleted] or [removed]
-            id_to_content[id] = (
+            is_deleted_or_removed = (
                 author == "[deleted]"
                 or author == "[removed]"
                 or body == "[deleted]"
                 or body == "[removed]"
             )
+            is_not_english = False
+            if (
+                check_english
+                and table == "comments_to_posts"
+                and not is_deleted_or_removed
+            ):
+                # Check if the content is in English
+                try:
+                    lang = detect(body)
+                    if lang != "en":
+                        is_not_english = True
+                except Exception:
+                    is_not_english = True
+            id_to_content[id] = is_deleted_or_removed or is_not_english
 
     if num_authors is None:
         # Direct deletion approach for the simple filtering case
@@ -171,10 +195,15 @@ def filter_threads(con, table_to_filter, new_table, num_authors=None):
                     authors[author] = authors.get(author, 0) + 1
 
             # Check criteria
-            if len(authors) == num_authors and all(
-                count >= 2 for count in authors.values()
-            ):
-                valid_rows.append(row)
+            if min_authors:
+                # For min_authors, check if there are at least num_authors unique authors
+                if len(authors) >= num_authors:
+                    valid_rows.append(row)
+            else:
+                if len(authors) == num_authors and all(
+                    count >= 2 for count in authors.values()
+                ):
+                    valid_rows.append(row)
 
         # Batch insert valid rows into new_table
         if valid_rows:
@@ -212,3 +241,110 @@ def filter_by_score(con, table_to_filter):
         """
     )
     log_with_resources("Created threads_non_viral table")
+
+
+def create_testing_threads(
+    con, table_to_filter, new_table, num_threads_per_category=20
+):
+    log_with_resources(f"Starting creation of {new_table}...")
+    con.execute(
+        f"""
+        CREATE OR REPLACE TABLE {new_table} AS
+        SELECT * FROM {table_to_filter} WHERE FALSE
+        """
+    )
+
+    # List to store all comments_to_posts IDs that will be moved
+    all_ids_to_move = []
+
+    # Define the static source tables
+    source_tables = [
+        "threads_2_authors",
+        "threads_3_authors",
+        "threads_4_authors",
+        "threads_5_authors",
+        "threads_viral",
+        "threads_non_viral",
+    ]
+
+    with open("../data/saved_stats.json", "r") as f:
+        existing_data = json.load(f)
+    distribution = existing_data["subreddit_distribution_threads"]
+    for key, value in sorted(distribution.items(), key=lambda x: x[1], reverse=True)[
+        :5
+    ]:
+        source_tables.append(f"{key}_threads")
+    for source_tbl in source_tables:
+        try:
+            eligible_ids_query = f"""
+                SELECT t1.comments_to_posts
+                FROM {source_tbl} AS t1
+                JOIN {table_to_filter} AS t2
+                ON t1.comments_to_posts = t2.comments_to_posts
+            """
+            eligible_ids = [
+                row[0] for row in con.execute(eligible_ids_query).fetchall()
+            ]
+            # Randomly select num_threads_per_category threads
+            selected_ids = random.sample(
+                eligible_ids, min(len(eligible_ids), num_threads_per_category)
+            )
+            log_with_resources(
+                f"Selected {len(selected_ids)} threads from {source_tbl}."
+            )
+
+            all_ids_to_move.extend(selected_ids)
+            all_ids_to_move = list(set(all_ids_to_move))
+        except Exception as e:
+            log_with_resources(
+                f"Error processing {source_tbl}: {e}. Continuing with other tables."
+            )
+
+    if all_ids_to_move:
+        # Create a temporary table for IDs to move
+        con.execute("CREATE TEMPORARY TABLE temp_ids_to_move (id VARCHAR);")
+        con.executemany(
+            "INSERT INTO temp_ids_to_move VALUES (?)", [(id,) for id in all_ids_to_move]
+        )
+
+        # Insert selected threads into testing_threads
+        count_inserted_before = con.execute(
+            f"SELECT COUNT(*) FROM {new_table};"
+        ).fetchone()[0]
+        con.execute(
+            f"""
+            INSERT INTO {new_table}
+            SELECT t1.*
+            FROM {table_to_filter} AS t1
+            JOIN temp_ids_to_move AS t2 ON t1.comments_to_posts = t2.id;
+        """
+        )
+        count_inserted_after = con.execute(
+            f"SELECT COUNT(*) FROM {new_table};"
+        ).fetchone()[0]
+        log_with_resources(
+            f"Inserted {count_inserted_after - count_inserted_before} threads into {new_table}."
+        )
+
+        # Delete selected threads from training_threads
+        count_deleted_before = con.execute(
+            f"SELECT COUNT(*) FROM {table_to_filter};"
+        ).fetchone()[0]
+        con.execute(
+            f"""
+            DELETE FROM {table_to_filter}
+            WHERE comments_to_posts IN (SELECT id FROM temp_ids_to_move);
+        """
+        )
+        count_deleted_after = con.execute(
+            f"SELECT COUNT(*) FROM {table_to_filter};"
+        ).fetchone()[0]
+        log_with_resources(
+            f"Deleted {count_deleted_before - count_deleted_after} threads from {table_to_filter}."
+        )
+
+        # Drop the temporary table
+        con.execute("DROP TABLE temp_ids_to_move;")
+    else:
+        log_with_resources("No threads found to move to testing_threads.")
+    log_with_resources(f"Finished creation of {new_table}.")

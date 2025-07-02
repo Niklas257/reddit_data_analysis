@@ -3,6 +3,7 @@ import random
 from textwrap import fill
 from tqdm import tqdm
 import json
+from create_database import log_with_resources
 
 
 def get_random_thread_details(table, con, seed, verbose=False):
@@ -167,3 +168,152 @@ def create_subset_tables(con, table):
             values = tuple(row)
 
             con.execute(sql, values)
+
+
+def generate_jsonl_from_threads(
+    con, training_threads_table, output_filepath, testing=False
+):
+    """
+    Generates a .jsonl file from the specified training threads table.
+
+    Each line in the .jsonl file will be a JSON object with:
+    - "sdid": The ID from the 'comments_to_posts' column of the thread.
+    - "text": A concatenated string of author-prefixed content from the thread,
+              starting with the 'posts' content, then subsequent comments.
+
+    Args:
+        con: A DuckDB database connection object.
+        training_threads_table (str): The name of the table containing the filtered threads (e.g., "training_threads").
+        output_filepath (str): The path to the output .jsonl file.
+    """
+
+    # 1. Get column names and their order from the training_threads_table
+    thread_column_info = con.execute(
+        f"""
+        SELECT column_name, ordinal_position
+        FROM information_schema.columns
+        WHERE table_name = '{training_threads_table}'
+        ORDER BY ordinal_position
+        """
+    ).fetchall()
+
+    thread_column_names = [col[0] for col in thread_column_info]
+
+    # Find the index of the 'comments_to_posts' column
+    try:
+        comments_to_posts_idx = thread_column_names.index("comments_to_posts")
+    except ValueError:
+        raise ValueError(
+            f"Column 'comments_to_posts' not found in table '{training_threads_table}'. "
+            "Please ensure the table has this column for sdid."
+        )
+
+    # Pre-fetch all necessary content and author data into a single lookup dictionary
+    id_to_info = {}  # Stores {'id': {'author': '...', 'content': '...'}}
+
+    # Fetch posts data
+    posts_data = con.execute(
+        "SELECT id, author, title, selftext, subreddit FROM posts"
+    ).fetchall()
+    for post_id, author, title, selftext, subreddit in posts_data:
+        combined_content = f"{title or ''} {selftext or ''}".strip()
+        id_to_info[post_id] = {
+            "author": author,
+            "content": combined_content,
+            "subreddit": subreddit,
+        }
+
+    # Fetch comments data for all relevant comment tables
+    comment_tables = con.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'main'
+        AND (table_name LIKE 'comments_to_posts%' OR table_name LIKE 'comments_to_comments_%')
+        """
+    ).fetchall()
+    comment_tables = [tbl[0] for tbl in comment_tables]
+
+    for table_name in comment_tables:
+        col_check = con.execute(f"PRAGMA table_info('{table_name}');").fetchall()
+        if any(c[1] == "body" for c in col_check):
+            comments_data = con.execute(
+                f"SELECT id, author, body FROM {table_name}"
+            ).fetchall()
+            for comment_id, author, body in comments_data:
+                id_to_info[comment_id] = {"author": author, "content": body or ""}
+
+    # Open the output .jsonl file
+    with open(output_filepath, "w", encoding="utf-8") as f:
+        # Fetch all rows from the training_threads table
+        threads_data = con.execute(f"SELECT * FROM {training_threads_table}").fetchall()
+
+        # Process each thread (row)
+        for thread_row in threads_data:
+            # Get the sdid from the comments_to_posts column
+            sdid = thread_row[comments_to_posts_idx]
+
+            # Initialize author mapping and text parts for the current thread
+            current_thread_authors = {}
+            author_counter = 0
+            text_parts = []
+
+            # Process the initial post (which is always the first column, index 0)
+            post_id = thread_row[0]
+            if post_id is not None:
+                post_info = id_to_info.get(post_id)
+                if post_info:
+                    author = post_info["author"]
+                    content = post_info["content"]
+
+                    # Assign [author0] to the author of the initial post
+                    if author not in current_thread_authors:
+                        current_thread_authors[author] = f"[author{author_counter}]"
+                        author_counter += 1
+
+                    text_parts.append(f"{current_thread_authors[author]} {content}")
+                else:
+                    log_with_resources(
+                        f"Warning: Post ID {post_id} from thread {sdid} not found in pre-fetched content data."
+                    )
+
+            # Process subsequent comments (from index 1 onwards in the thread_row)
+            # This covers comments_to_posts, comments_to_comments_1, etc.
+            for id_in_thread_row in thread_row[1:]:  # Start from the second column
+                if id_in_thread_row is None:
+                    continue  # Skip empty slots in the thread structure
+
+                item_info = id_to_info.get(id_in_thread_row)
+
+                if item_info:
+                    author = item_info["author"]
+                    content = item_info["content"]
+
+                    # Assign anonymized author ID if not already mapped for this thread
+                    if author not in current_thread_authors:
+                        current_thread_authors[author] = f"[author{author_counter}]"
+                        author_counter += 1
+
+                    anonymized_author = current_thread_authors[author]
+                    text_parts.append(f"{anonymized_author} {content}")
+                else:
+                    log_with_resources(
+                        f"Warning: Comment ID {id_in_thread_row} from thread {sdid} not found in pre-fetched content data."
+                    )
+
+            # Join all text parts to form the final thread text
+            full_thread_text = " ".join(text_parts)
+
+            # Create the JSON object for the current thread
+            json_object = {"sdid": sdid, "text": full_thread_text}
+
+            if testing:
+                subreddit = id_to_info.get(post_id, {}).get("subreddit")
+                json_object["subreddit"] = subreddit if subreddit else "unknown"
+
+            # Write the JSON object as a line in the .jsonl file
+            f.write(json.dumps(json_object, ensure_ascii=False) + "\n")
+
+    log_with_resources(
+        f"Successfully generated {output_filepath} with data from {training_threads_table}."
+    )
