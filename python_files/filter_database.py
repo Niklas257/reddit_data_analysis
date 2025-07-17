@@ -1,6 +1,5 @@
 from stats import log_with_resources
 from langdetect import detect
-import json
 import random
 
 
@@ -225,7 +224,7 @@ def filter_by_score(con, table_to_filter):
     """
     con.execute(
         f"""
-        CREATE TABLE threads_viral AS
+        CREATE OR REPLACE TABLE threads_viral AS
         SELECT *
         FROM {table_to_filter}
         WHERE posts IN (SELECT id FROM posts WHERE score >= 1000)
@@ -234,7 +233,7 @@ def filter_by_score(con, table_to_filter):
     log_with_resources("Created threads_viral table")
     con.execute(
         f"""
-        CREATE TABLE threads_non_viral AS
+        CREATE OR REPLACE TABLE threads_non_viral AS
         SELECT *
         FROM {table_to_filter}
         WHERE posts IN (SELECT id FROM posts WHERE score < 1000)
@@ -266,14 +265,19 @@ def create_testing_threads(
         "threads_viral",
         "threads_non_viral",
     ]
+    subreddit_tables = [
+        "AskReddit_threads",
+        "memes_threads",
+        "distantsocializing_threads",
+        "ACTrade_threads",
+        "RedditSessions_threads",
+        "AmItheAsshole_threads",
+        "wallstreetbets_threads",
+        "politics_threads",
+        "teenagers_threads",
+        "AnimalCrossing_threads",
+    ]
 
-    with open("../data/saved_stats.json", "r") as f:
-        existing_data = json.load(f)
-    distribution = existing_data["subreddit_distribution_threads"]
-    for key, value in sorted(distribution.items(), key=lambda x: x[1], reverse=True)[
-        :5
-    ]:
-        source_tables.append(f"{key}_threads")
     for source_tbl in source_tables:
         try:
             eligible_ids_query = f"""
@@ -299,6 +303,44 @@ def create_testing_threads(
             log_with_resources(
                 f"Error processing {source_tbl}: {e}. Continuing with other tables."
             )
+
+    # Collect all eligible IDs from all subreddit tables
+    all_subreddit_ids = []
+    for source_tbl in subreddit_tables:
+        try:
+            eligible_ids_query = f"""
+                SELECT t1.comments_to_posts
+                FROM {source_tbl} AS t1
+                JOIN {table_to_filter} AS t2
+                ON t1.comments_to_posts = t2.comments_to_posts
+            """
+            eligible_ids = [
+                row[0] for row in con.execute(eligible_ids_query).fetchall()
+            ]
+            all_subreddit_ids.extend(eligible_ids)
+            log_with_resources(
+                f"Found {len(eligible_ids)} eligible threads from {source_tbl}."
+            )
+        except Exception as e:
+            log_with_resources(
+                f"Error processing {source_tbl}: {e}. Continuing with other tables."
+            )
+
+    # Remove duplicates from all subreddit IDs
+    all_subreddit_ids = list(set(all_subreddit_ids))
+    log_with_resources(
+        f"Total unique threads across all subreddits: {len(all_subreddit_ids)}"
+    )
+
+    # Randomly select up to 100 threads from all subreddits combined
+    subreddit_sample_size = min(100, len(all_subreddit_ids))
+    if all_subreddit_ids:
+        selected_subreddit_ids = random.sample(all_subreddit_ids, subreddit_sample_size)
+        log_with_resources(
+            f"Selected {len(selected_subreddit_ids)} threads from all subreddits combined."
+        )
+        all_ids_to_move.extend(selected_subreddit_ids)
+        all_ids_to_move = list(set(all_ids_to_move))
 
     if all_ids_to_move:
         # Create a temporary table for IDs to move
