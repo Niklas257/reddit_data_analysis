@@ -10,8 +10,8 @@ class ClassifierConfig:
     def __init__(self):
         # --- Configuration ---
         self.MODEL_NAME = "answerdotai/ModernBERT-base"
-        self.MAX_LEN = 4096
-        self.BATCH_SIZE = 16
+        self.MAX_LEN = 512
+        self.BATCH_SIZE = 16  # Per-GPU batch size (total = BATCH_SIZE * num_GPUs)
         self.LEARNING_RATE = 1e-4
         self.RANDOM_SEED = 42
         self.EARLY_STOPPING_PATIENCE = 3
@@ -23,9 +23,9 @@ class ClassifierConfig:
         self.REDDIT_VAL_FILE_PATH = "/kaggle/input/reddit-data/reddit_val.jsonl"
         self.REDDIT_TEST_FILE_PATH = "/kaggle/input/reddit-data/reddit_test.jsonl"
 
-        self.MAX_CURRICULUM_ITERATIONS = 10  # Max number of curriculum steps
+        self.MAX_CURRICULUM_ITERATIONS = 0.1  # Max number of curriculum steps
         self.STUDENT_TEACHER_EPOCHS_PER_ITERATION = (
-            10  # Number of epochs the student trains on the current curriculum
+            1  # Number of epochs the student trains on the current curriculum
         )
         self.CONFIDENCE_THRESHOLD_START = (
             0.95  # Initial high confidence for pseudo-labeling
@@ -36,8 +36,8 @@ class ClassifierConfig:
         )
         self.UNLABELED_DATA_FRACTION_PER_STEP = 1  # Fraction of unlabeled data to consider for pseudo-labeling in each step, helps with large datasets
         self.PSEUDO_LABEL_BATCH_SIZE = (
-            self.BATCH_SIZE
-        )  # Larger batch size for pseudo-labeling for efficiency (keep low to avoid OOM issues on smaller GPUs or large models)
+            self.BATCH_SIZE * 1
+        )  # Larger batch size for pseudo-labeling for efficiency. Can be 2-4x training batch size since no gradients needed
 
         self.SUPERVISED_TRAINING_ONLY = False  # Set to True to skip curriculum learning and only do supervised training
         self.USE_QLORA = True  # Set to True to enable QLoRA
