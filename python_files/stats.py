@@ -413,6 +413,9 @@ def calculate_variance(table):
             expanded_data.extend([key] * count)  # Repeat key 'count' times
 
     # Compute Q1, Q2, Q3, and IQR
+    if len(expanded_data) == 0:
+        print(f"No data found for {table} to calculate variance")
+        return
     q1 = expanded_data[math.ceil(0.25 * len(expanded_data) - 1)]
     try:
         q2 = (

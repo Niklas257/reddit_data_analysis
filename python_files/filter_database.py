@@ -224,22 +224,22 @@ def filter_by_score(con, table_to_filter):
     """
     con.execute(
         f"""
-        CREATE OR REPLACE TABLE threads_viral AS
+        CREATE OR REPLACE TABLE {table_to_filter}_viral AS
         SELECT *
         FROM {table_to_filter}
         WHERE posts IN (SELECT id FROM posts WHERE score >= 1000)
         """
     )
-    log_with_resources("Created threads_viral table")
+    log_with_resources(f"Created {table_to_filter}_viral table")
     con.execute(
         f"""
-        CREATE OR REPLACE TABLE threads_non_viral AS
+        CREATE OR REPLACE TABLE {table_to_filter}_non_viral AS
         SELECT *
         FROM {table_to_filter}
         WHERE posts IN (SELECT id FROM posts WHERE score < 1000)
         """
     )
-    log_with_resources("Created threads_non_viral table")
+    log_with_resources(f"Created {table_to_filter}_non_viral table")
 
 
 def create_testing_threads(
@@ -390,3 +390,83 @@ def create_testing_threads(
     else:
         log_with_resources("No threads found to move to testing_threads.")
     log_with_resources(f"Finished creation of {new_table}.")
+
+
+def filter_by_constructiveness(con, table_to_filter, new_table, jsonl_file):
+    """
+    Create a subset of constructive threads from table_to_filter and save to new_table by checking
+    if the comments_to_posts have prediction == 1 in the jsonl_file.
+    """
+    import json
+
+    log_with_resources(f"Starting constructiveness filtering from {jsonl_file}...")
+
+    # Read the jsonl file and collect all sdids with prediction == 1
+    constructive_sdids = set()
+
+    try:
+        with open(jsonl_file, "r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    # Check if this entry has prediction == 1 (constructive)
+                    if data.get("prediction") == 1:
+                        constructive_sdids.add(data.get("sdid"))
+                except json.JSONDecodeError as e:
+                    log_with_resources(f"Error parsing JSON on line {line_num}: {e}")
+                    continue
+    except FileNotFoundError:
+        log_with_resources(f"Error: Could not find file {jsonl_file}")
+        return
+    except Exception as e:
+        log_with_resources(f"Error reading file {jsonl_file}: {e}")
+        return
+
+    log_with_resources(
+        f"Found {len(constructive_sdids)} constructive entries in {jsonl_file}"
+    )
+
+    if not constructive_sdids:
+        log_with_resources("No constructive entries found. Creating empty table.")
+        # Create empty table with same structure
+        con.execute(
+            f"CREATE OR REPLACE TABLE {new_table} AS SELECT * FROM {table_to_filter} WHERE FALSE"
+        )
+        return
+
+    # Create a temporary table with the constructive sdids for efficient filtering
+    con.execute("CREATE TEMPORARY TABLE temp_constructive_sdids (sdid VARCHAR)")
+
+    # Insert constructive sdids in batches
+    constructive_list = list(constructive_sdids)
+    batch_size = 1000
+    for i in range(0, len(constructive_list), batch_size):
+        batch = constructive_list[i : i + batch_size]
+        con.executemany(
+            "INSERT INTO temp_constructive_sdids VALUES (?)",
+            [(sdid,) for sdid in batch],
+        )
+
+    # Filter the table to include only constructive threads
+    # The comments_to_posts column contains the ID that should match with sdid
+    filter_query = f"""
+    CREATE OR REPLACE TABLE {new_table} AS
+    SELECT t.*
+    FROM {table_to_filter} t
+    JOIN temp_constructive_sdids c ON t.comments_to_posts = c.sdid
+    """
+
+    con.execute(filter_query)
+
+    # Get count of filtered results
+    count_result = con.execute(f"SELECT COUNT(*) FROM {new_table}").fetchone()[0]
+
+    # Clean up temporary table
+    con.execute("DROP TABLE temp_constructive_sdids")
+
+    log_with_resources(
+        f"Created {new_table} with {count_result} constructive threads from {table_to_filter}"
+    )

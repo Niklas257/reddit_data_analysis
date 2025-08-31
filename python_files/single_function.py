@@ -3,21 +3,33 @@ import json
 import threading
 import time
 from create_database import (
+    add_initial_tables,
+    add_comments_to_comments_tables_old,
+    cascading_comment_deletion,
+    create_lookup_table,
     create_subreddit_tables,
+    create_threads_table,
 )
 from stats import (
+    create_row_counts_table,
     get_depth_distribution,
     get_number_of_threads,
     get_thread_score_distribution,
+    get_subreddit_distribution,
     table_stats,
     calculate_weighted_average,
+    calculate_variance,
     get_thread_lengths,
     get_author_distribution,
     log_with_resources,
-    calculate_variance,
 )
-from filter_database import filter_threads, create_testing_threads, filter_by_score
-from get_samples import generate_jsonl_from_threads
+
+from filter_database import (
+    make_threads_unique,
+    filter_threads,
+    filter_by_score,
+    filter_by_constructiveness,
+)
 
 monitoring_active = True
 max_workers = 90
@@ -42,41 +54,124 @@ con.execute("SET threads TO 20;")
 con.execute("PRAGMA verify_parallelism;")
 con.execute("PRAGMA memory_limit='30GB';")
 log_with_resources("threads set to 20")
-"""filter_threads(
-    con,
-    "threads",
-    "training_threads",
-    num_authors=2,
-    min_authors=True,
-    check_english=True,
-)
-filter_threads(con, "training_threads", "threads_2_authors", num_authors=2)
-filter_threads(con, "training_threads", "threads_3_authors", num_authors=3)
-filter_threads(con, "training_threads", "threads_4_authors", num_authors=4)
-filter_threads(con, "training_threads", "threads_5_authors", num_authors=5)
-filter_by_score(con, "training_threads")
-create_subreddit_tables(con, "RedditSessions")
-create_subreddit_tables(con, "AmItheAsshole")
-create_subreddit_tables(con, "wallstreetbets")
-create_subreddit_tables(con, "politics")
-create_subreddit_tables(con, "teenagers")
-create_subreddit_tables(con, "AnimalCrossing")
-create_testing_threads(
-    con, "training_threads", "testing_threads", num_threads_per_category=20
-)
-generate_jsonl_from_threads(con, "training_threads", "../data/training_threads.jsonl")
-generate_jsonl_from_threads(
-    con, "testing_threads", "../data/testing_threads.jsonl", testing=True
-)
-for table in con.execute("SHOW TABLES").fetchdf()["name"]:
+"""for table in con.execute("SHOW TABLES").fetchdf()["name"]:
     print(f"Table: {table}")
     print(con.execute(f"SELECT COUNT(*) FROM {table}").fetchdf())
     print("\n")
+
+filter_by_constructiveness(
+    con,
+    "training_threads",
+    "constructive_threads",
+    "../training_data/reddit_train_annotated.jsonl",
+)"""
+
 """
-get_depth_distribution("testing_threads", con)
-get_thread_lengths("testing_threads", con)
+get_depth_distribution("training_threads", con)
+get_thread_lengths("training_threads", con)
+get_number_of_threads("training_threads", con)
+get_thread_score_distribution("training_threads", con)
+get_subreddit_distribution("training_threads", con)
+get_author_distribution("training_threads", con)
+
+calculate_weighted_average("depth_distribution_training_threads")
+calculate_weighted_average("author_distribution_training_threads")
+calculate_weighted_average("thread_score_distribution_training_threads")
+calculate_weighted_average("thread_lengths_training_threads")
+calculate_variance("depth_distribution_training_threads")
+calculate_variance("author_distribution_training_threads")
+calculate_variance("thread_score_distribution_training_threads")
+calculate_variance("thread_lengths_training_threads")
+
+# Create subsets with 2,3,4,5 authors
+
+filter_threads(
+    con,
+    "training_threads",
+    "training_threads_2_authors",
+    num_authors=2,
+)
+filter_threads(
+    con,
+    "training_threads",
+    "training_threads_3_authors",
+    num_authors=3,
+)
+filter_threads(
+    con,
+    "training_threads",
+    "training_threads_4_authors",
+    num_authors=4,
+)
+filter_threads(
+    con,
+    "training_threads",
+    "training_threads_5_authors",
+    num_authors=5,
+)
+
+for i in range(2, 6):
+    get_depth_distribution(f"training_threads_{i}_authors", con)
+    get_thread_lengths(f"training_threads_{i}_authors", con)
+    get_number_of_threads(f"training_threads_{i}_authors", con)
+    get_thread_score_distribution(f"training_threads_{i}_authors", con)
+    get_subreddit_distribution(f"training_threads_{i}_authors", con)
+    calculate_weighted_average(f"depth_distribution_training_threads_{i}_authors")
+    calculate_weighted_average(
+        f"thread_score_distribution_training_threads_{i}_authors"
+    )
+    calculate_weighted_average(f"thread_lengths_training_threads_{i}_authors")
+    calculate_variance(f"depth_distribution_training_threads_{i}_authors")
+    calculate_variance(f"thread_score_distribution_training_threads_{i}_authors")
+    calculate_variance(f"thread_lengths_training_threads_{i}_authors")
+filter_by_score(con, "training_threads")
+for table in [
+    "training_threads_viral",
+    "training_threads_non_viral",
+]:
+    get_depth_distribution(table, con)
+    get_thread_lengths(table, con)
+    get_number_of_threads(table, con)
+    get_thread_score_distribution(table, con)
+    get_subreddit_distribution(table, con)
+    get_author_distribution(table, con)
+    calculate_weighted_average(f"depth_distribution_{table}")
+    calculate_weighted_average(f"author_distribution_{table}")
+    calculate_weighted_average(f"thread_score_distribution_{table}")
+    calculate_weighted_average(f"thread_lengths_{table}")
+    calculate_variance(f"depth_distribution_{table}")
+    calculate_variance(f"author_distribution_{table}")
+    calculate_variance(f"thread_score_distribution_{table}")
+    calculate_variance(f"thread_lengths_{table}")
+"""
+subreddits = [
+    "AskReddit",
+    "memes",
+    "distantsocializing",
+    "ACTrade",
+    "RedditSessions",
+]
+for subreddit in subreddits:
+    create_subreddit_tables(con, subreddit, threads_table="training_threads")
+    get_depth_distribution(f"{subreddit}_training_threads", con)
+    get_thread_lengths(f"{subreddit}_training_threads", con)
+    get_number_of_threads(f"{subreddit}_training_threads", con)
+    get_thread_score_distribution(f"{subreddit}_training_threads", con)
+    get_author_distribution(f"{subreddit}_training_threads", con)
+    calculate_weighted_average(f"depth_distribution_{subreddit}_training_threads")
+    calculate_weighted_average(f"author_distribution_{subreddit}_training_threads")
+    calculate_weighted_average(
+        f"thread_score_distribution_{subreddit}_training_threads"
+    )
+    calculate_weighted_average(f"thread_lengths_{subreddit}_training_threads")
+    calculate_variance(f"depth_distribution_{subreddit}_training_threads")
+    calculate_variance(f"author_distribution_{subreddit}_training_threads")
+    calculate_variance(f"thread_score_distribution_{subreddit}_training_threads")
+    calculate_variance(f"thread_lengths_{subreddit}_training_threads")
+
+
 monitoring_active = False
-monitor_thread.join()  # optional, if you want to ensure it has stopped before exiting
+monitor_thread.join()
 log_with_resources("Script finished")
 con.commit()
 con.close()

@@ -9,11 +9,11 @@ from create_database import (
     # add_comments_to_comments_tables,  # Commented out as it's not used
     # create_lookup_table,  # Commented out as it's not used
     # create_subreddit_tables,  # Commented out as it's not used
-    # create_threads_table,  # Commented out as it's not used
+    # create_training_threads_table,  # Commented out as it's not used
     sort_key,
 )
 
-# from filter_database import make_threads_unique, filter_threads  # Commented out as it's not used
+# from filter_database import make_training_threads_unique, filter_training_threads  # Commented out as it's not used
 
 # db = "../data_scc/database_subset10.db"
 # con = duckdb.connect(db)
@@ -24,63 +24,63 @@ category_groups = {
     "author_distribution": {
         # Similar groupings for author_distribution stats
         "virality": [
-            "author_distribution_threads",
-            "author_distribution_threads_viral",
-            "author_distribution_threads_non_viral",
+            "author_distribution_training_threads",
+            "author_distribution_training_threads_viral",
+            "author_distribution_training_threads_non_viral",
         ],
         "subreddits": [
-            "author_distribution_threads",
-            "author_distribution_AskReddit_threads",
-            "author_distribution_memes_threads",
-            "author_distribution_distantsocializing_threads",
-            "author_distribution_ACTrade_threads",
-            "author_distribution_RedditSessions_threads",
+            "author_distribution_training_threads",
+            "author_distribution_AskReddit_training_threads",
+            "author_distribution_memes_training_threads",
+            "author_distribution_distantsocializing_training_threads",
+            "author_distribution_ACTrade_training_threads",
+            "author_distribution_RedditSessions_training_threads",
         ],
     },
     "lengths": {
         # Similar groupings for lengths stats
         "virality": [
-            "thread_lengths_threads",
-            "thread_lengths_threads_viral",
-            "thread_lengths_threads_non_viral",
+            "thread_lengths_training_threads",
+            "thread_lengths_training_threads_viral",
+            "thread_lengths_training_threads_non_viral",
         ],
         "participants": [
-            "thread_lengths_threads",
-            "thread_lengths_threads_2_authors",
-            "thread_lengths_threads_3_authors",
-            "thread_lengths_threads_4_authors",
-            "thread_lengths_threads_5_authors",
+            "thread_lengths_training_threads",
+            "thread_lengths_training_threads_2_authors",
+            "thread_lengths_training_threads_3_authors",
+            "thread_lengths_training_threads_4_authors",
+            "thread_lengths_training_threads_5_authors",
         ],
         "subreddits": [
-            "thread_lengths_threads",
-            "thread_lengths_AskReddit_threads",
-            "thread_lengths_memes_threads",
-            "thread_lengths_distantsocializing_threads",
-            "thread_lengths_ACTrade_threads",
-            "thread_lengths_RedditSessions_threads",
+            "thread_lengths_training_threads",
+            "thread_lengths_AskReddit_training_threads",
+            "thread_lengths_memes_training_threads",
+            "thread_lengths_distantsocializing_training_threads",
+            "thread_lengths_ACTrade_training_threads",
+            "thread_lengths_RedditSessions_training_threads",
         ],
     },
     "summed_score": {
         # Similar groupings for score stats
         "virality": [
-            "thread_score_distribution_threads",
-            "thread_score_distribution_threads_viral",
-            "thread_score_distribution_threads_non_viral",
+            "thread_score_distribution_training_threads",
+            "thread_score_distribution_training_threads_viral",
+            "thread_score_distribution_training_threads_non_viral",
         ],
         "participants": [
-            "thread_score_distribution_threads",
-            "thread_score_distribution_threads_2_authors",
-            "thread_score_distribution_threads_3_authors",
-            "thread_score_distribution_threads_4_authors",
-            "thread_score_distribution_threads_5_authors",
+            "thread_score_distribution_training_threads",
+            "thread_score_distribution_training_threads_2_authors",
+            "thread_score_distribution_training_threads_3_authors",
+            "thread_score_distribution_training_threads_4_authors",
+            "thread_score_distribution_training_threads_5_authors",
         ],
         "subreddits": [
-            "thread_score_distribution_threads",
-            "thread_score_distribution_AskReddit_threads",
-            "thread_score_distribution_memes_threads",
-            "thread_score_distribution_distantsocializing_threads",
-            "thread_score_distribution_ACTrade_threads",
-            "thread_score_distribution_RedditSessions_threads",
+            "thread_score_distribution_training_threads",
+            "thread_score_distribution_AskReddit_training_threads",
+            "thread_score_distribution_memes_training_threads",
+            "thread_score_distribution_distantsocializing_training_threads",
+            "thread_score_distribution_ACTrade_training_threads",
+            "thread_score_distribution_RedditSessions_training_threads",
         ],
     },
 }
@@ -117,9 +117,9 @@ def concise_legend_label(key):
         "RedditSessions",
     ]
     for sub in subreddits:
-        if f"_{sub}_" in key or key.endswith(f"_{sub}_threads"):
+        if f"_{sub}_" in key or key.endswith(f"_{sub}_training_threads"):
             return sub
-    # For keys like 'thread_lengths_threads_2_authors'
+    # For keys like 'thread_lengths_training_threads_2_authors'
     if "_authors" in key:
         match = re.search(r"(\d+)_authors", key)
         if match:
@@ -129,7 +129,7 @@ def concise_legend_label(key):
     elif "_viral" in key:
         return "Viral"
     # Special case for 'threads' only (not ending with _authors)
-    elif key.endswith("_threads") and not re.search(r"_\d+_authors", key):
+    elif key.endswith("_training_threads") and not re.search(r"_\d+_authors", key):
         return "All Threads"
     # Fallback: prettify the last part
     return key.replace("_", " ").title()
@@ -468,10 +468,10 @@ for key, values in data.items():
                 key in group_keys
                 and key
                 not in [
-                    "depth_distribution_threads",
-                    "author_distribution_threads",
-                    "thread_lengths_threads",
-                    "thread_score_distribution_threads",
+                    "depth_distribution_training_threads",
+                    "author_distribution_training_threads",
+                    "thread_lengths_training_threads",
+                    "thread_score_distribution_training_threads",
                 ]
                 or "depth" in key
                 or "lookup" in key
@@ -500,7 +500,7 @@ for key, values in data.items():
     y = list(values.values())
 
     # Process numerical x-axis
-    if "thread_score_distribution_threads" in key:
+    if "thread_score_distribution_training_threads" in key:
         x_int = [int(k) for k in x]
         filtered = [(xi, yi) for xi, yi in zip(x_int, y) if -50 <= xi <= 50]
 
@@ -528,7 +528,7 @@ for key, values in data.items():
 
         # Set the x-axis limits to match the data range
         plt.xlim(min(x), max(x))
-    elif "thread_lengths_threads" in key:
+    elif "thread_lengths_training_threads" in key:
         x_int = [int(k) for k in x]
         # Filter values and ensure we start at 1 (no thread has length 0)
         filtered = [(xi, yi) for xi, yi in zip(x_int, y) if 1 <= xi <= 10]
@@ -538,7 +538,7 @@ for key, values in data.items():
 
         x = [xi for xi, _ in filtered]
         y = [yi for _, yi in filtered]
-    elif "author_distribution_threads" in key:
+    elif "author_distribution_training_threads" in key:
         x_int = [int(k) for k in x]
         # Filter values and ensure we start at 1 (no thread has 0 authors)
         filtered = [(xi, yi) for xi, yi in zip(x_int, y) if 1 <= xi <= 10]
@@ -565,7 +565,7 @@ for key, values in data.items():
     y = [max(0, v) for v in y]
 
     # Create bar plot for individual stats (keeping as bars for single distributions)
-    if "thread_lengths_threads" in key:
+    if "thread_lengths_training_threads" in key:
         # For thread lengths, use integers for x positions
         x_positions = range(len(x))
         bars = plt.bar(x_positions, y, color=PROFESSIONAL_COLORS[0], alpha=0.7)
@@ -583,9 +583,9 @@ for key, values in data.items():
 
         plt.gca().yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
         plt.ticklabel_format(style="sci", axis="y")
-        plt.yticks([0, 1e7, 2e7, 3e7, 4e7], fontsize=25)
+        # plt.yticks([0, 1e7, 2e7, 3e7, 4e7], fontsize=25)
         plt.gca().yaxis.offsetText.set_fontsize(25)
-    elif "author_distribution_threads" in key:
+    elif "author_distribution_training_threads" in key:
         # For author distribution, use integers for x positions
         x_positions = range(len(x))
         bars = plt.bar(x_positions, y, color=PROFESSIONAL_COLORS[0], alpha=0.7)
@@ -603,9 +603,9 @@ for key, values in data.items():
 
         plt.gca().yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
         plt.ticklabel_format(style="sci", axis="y")
-        plt.yticks([0, 1e7, 2e7, 3e7, 4e7], fontsize=25)
+        # plt.yticks([0, 1e7, 2e7, 3e7, 4e7], fontsize=25)
         plt.gca().yaxis.offsetText.set_fontsize(25)
-    elif "thread_score_distribution_threads" in key:
+    elif "thread_score_distribution_training_threads" in key:
         # For score distribution, use actual x values
         x_int = [int(k) for k in x]
         filtered = [(xi, yi) for xi, yi in zip(x_int, y) if -10 <= xi <= 30]
@@ -635,7 +635,7 @@ for key, values in data.items():
 
         plt.gca().yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
         plt.ticklabel_format(style="sci", axis="y")
-        plt.yticks([0, 0.5e7, 1e7, 1.5e7, 2e7], fontsize=25)
+        # plt.yticks([0, 0.5e7, 1e7, 1.5e7, 2e7], fontsize=25)
         plt.gca().yaxis.offsetText.set_fontsize(25)
         plt.xlim(min(tick_positions), max(tick_positions))
     else:
@@ -658,13 +658,13 @@ for key, values in data.items():
 
     # Customize plot
     # plt.title(key.replace("_", " ").title(), fontsize=25)
-    # if key == "thread_score_distribution_threads":
+    # if key == "thread_score_distribution_training_threads":
     #     plt.title("Summed score - Unspecific Threads", fontsize=25)
-    if key == "thread_lengths_threads":
+    if key == "thread_lengths_training_threads":
         plt.xlabel("Lengths", fontsize=25)
-    elif key == "author_distribution_threads":
+    elif key == "author_distribution_training_threads":
         plt.xlabel("Number of authors", fontsize=25)
-    elif key == "thread_score_distribution_threads":
+    elif key == "thread_score_distribution_training_threads":
         plt.xlabel("Summed score", fontsize=25)
     elif "subreddit_distribution" in key:
         plt.xlabel("Subreddits", fontsize=25)

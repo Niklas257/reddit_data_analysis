@@ -505,7 +505,7 @@ def create_lookup_table(con):
     con.commit()
 
 
-def create_subreddit_tables(con, subreddit):
+def create_subreddit_tables(con, subreddit, threads_table="threads"):
     query = f"""
     CREATE OR REPLACE TABLE {subreddit}_ids AS
     SELECT id
@@ -523,9 +523,9 @@ def create_subreddit_tables(con, subreddit):
     con.execute(query)
 
     query = f"""
-    CREATE OR REPLACE TABLE {subreddit}_threads AS
+    CREATE OR REPLACE TABLE {subreddit}_{threads_table} AS
     SELECT *
-    FROM threads
+    FROM {threads_table}
     WHERE posts IN (SELECT id FROM {subreddit}_ids)
     """
     con.execute(query)
