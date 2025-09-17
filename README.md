@@ -17,7 +17,10 @@ The project supports multiple model architectures (ModernBERT, Qwen) and trainin
 
 The project implements a comprehensive self-training approach for constructiveness classification. The training workflow is visualized in the following diagram:
 
-![Self-training Process](./Self-training.drawio.pdf)
+<div align="center">
+  <img src="./Self-training.drawio.png" alt="Self-training Process" width="700">
+  <br><br/>
+</div>
 
 Self-training setup diagram showing one iteration of the iterative training process. The process begins with (1) supervised training of a student model using only labeled YNACC and IAC data (red). This trained student model then becomes the teacher model, which performs (2) pseudo-labeling by generating predictions on unlabeled Reddit data (yellow). These pseudo-labels undergo (3) confidence-based thresholding to filter out low-confidence predictions, resulting in high-confidence pseudo-labeled Reddit data (orange). The filtered pseudo-labeled Reddit data is then combined with the original labeled YNACC and IAC data to create an expanded training set for the next iteration. A new student model is initialized and trained on this combined dataset, and the cycle repeats. With each iteration, confidence thresholds are gradually lowered to include more pseudo-labeled samples, continuing until the process converges or reaches a predetermined minimum threshold.
 
