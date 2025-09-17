@@ -72,7 +72,7 @@ The `train_classifier.py` supports various training modes through configuration 
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/Niklas257/Reddit-Constructiveness-Classification.git
    cd reddit_project
    ```
 
