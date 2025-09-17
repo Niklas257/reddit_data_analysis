@@ -122,7 +122,7 @@ ANNOTATION_STARTING_ITERATION = config.ANNOTATION_STARTING_ITERATION
 ANNOTATION_CHECKPOINT_FREQUENCY = config.ANNOTATION_CHECKPOINT_FREQUENCY
 
 # Instruction tuning configuration
-USE_INSTRUCTION_TUNING = config.USE_INSTRUCTION_TUNING
+USE_LANGUAGE_MODEL = config.USE_LANGUAGE_MODEL
 INSTRUCTION_MODEL_NAME = config.INSTRUCTION_MODEL_NAME
 INSTRUCTION_THINKING_MODE = config.INSTRUCTION_THINKING_MODE
 INSTRUCTION_SYSTEM_PROMPT = config.INSTRUCTION_SYSTEM_PROMPT
@@ -2273,7 +2273,7 @@ def run_checkpoint_testing():
     config.login_to_huggingface(rank=0)
 
     # Check if we should use instruction tuning
-    if USE_INSTRUCTION_TUNING:
+    if USE_LANGUAGE_MODEL:
         print("Using instruction tuning mode with QWEN model")
         print(f"Instruction model: {INSTRUCTION_MODEL_NAME}")
         print(f"Thinking mode: {INSTRUCTION_THINKING_MODE}")

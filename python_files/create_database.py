@@ -1,225 +1,13 @@
+import json
 import re
+from time import time
+import threading
+import duckdb
 import pandas as pd
 import gc
-from stats import log_with_resources
-
-
-# Add initial tables to the database
-def add_posts_table(con, posts_file):
-    # Create posts table
-    query = f"""
-    CREATE OR REPLACE TABLE posts AS
-    SELECT id, title, selftext, subreddit, score, upvote_ratio, media, author
-    FROM read_csv_auto('{posts_file}',
-                    null_padding=True,
-                    ignore_errors=True)
-    -- LIMIT 1000000
-    """
-    con.execute(query)
-    log_with_resources("posts table created successfully.")
-
-
-def add_comments_working_table(con, comments_file):
-    # Create comments_working table
-    batch_size = 1000000  # Adjust based on your needs
-
-    # First create the target table structure
-    con.execute(
-        """
-    CREATE OR REPLACE TABLE comments_working (
-        id VARCHAR,
-        body VARCHAR,
-        score INTEGER,
-        author VARCHAR,
-        parent_id VARCHAR
-    )
-    """
-    )
-
-    chunk_counter = 0
-    total_rows = 0
-
-    for chunk in pd.read_csv(comments_file, chunksize=batch_size, dtype="str"):
-        chunk_counter += 1
-
-        # Explicit memory management
-        try:
-            # Create and insert batch
-            con.execute("CREATE TEMP TABLE batch AS SELECT * FROM chunk")
-            con.execute(
-                """
-            INSERT INTO comments_working
-            SELECT id, body, score, author, parent_id
-            FROM batch
-            """
-            )
-            rows_inserted = len(chunk)
-            total_rows += rows_inserted
-            print(
-                f"Batch {chunk_counter}: Inserted {rows_inserted} rows (Total: {total_rows})"
-            )
-            # Manually clean up
-            del chunk  # Explicitly delete the DataFrame
-            con.execute("DROP TABLE IF EXISTS batch")
-            gc.collect()  # Force garbage collection
-
-            # Progress tracking
-
-        except Exception as e:
-            print(f"Error processing batch {chunk_counter}: {str(e)}")
-            con.execute("DROP TABLE IF EXISTS batch")
-            raise
-
-    print(f"Finished loading {total_rows} total rows")
-
-
-def add_initial_comments_tables(con):
-    # Create comments_to_posts table
-    con.execute("BEGIN TRANSACTION")
-
-    try:
-        # Create the target table if it doesn't exist
-        con.execute(
-            """
-        CREATE OR REPLACE TABLE comments_to_posts (
-            id VARCHAR,
-            body VARCHAR,
-            score INTEGER,
-            author VARCHAR,
-            parent_id VARCHAR
-        )
-        """
-        )
-
-        # Insert matching records
-        con.execute(
-            """
-        INSERT INTO comments_to_posts
-        SELECT id, body, score, author, SUBSTRING(parent_id, 4) AS parent_id
-        FROM comments_working
-        WHERE SUBSTRING(parent_id, 4) IN (SELECT id FROM posts)
-        """
-        )
-        print("Inserted matching comments into comments_to_posts table successfully.")
-
-        # Delete processed records
-        con.execute(
-            """
-        DELETE FROM comments_working
-        WHERE SUBSTRING(parent_id, 4) IN (SELECT id FROM posts)
-        """
-        )
-
-        con.execute("COMMIT")
-        print("Successfully moved and deleted matching comments")
-
-    except Exception as e:
-        con.execute("ROLLBACK")
-        print(f"Error: {e}")
-
-    # Create comments_to_comments_1 table
-    con.execute("BEGIN TRANSACTION")
-
-    try:
-        # Create the target table if it doesn't exist
-        con.execute(
-            """
-        CREATE OR REPLACE TABLE comments_to_comments_1 (
-            id VARCHAR,
-            body VARCHAR,
-            score INTEGER,
-            author VARCHAR,
-            parent_id VARCHAR
-        )
-        """
-        )
-
-        # Insert matching records
-        con.execute(
-            """
-        INSERT INTO comments_to_comments_1
-        SELECT id, body, score, author, SUBSTRING(parent_id, 4) AS parent_id
-        FROM comments_working
-        WHERE SUBSTRING(parent_id, 4) IN (SELECT id FROM comments_to_posts)
-        """
-        )
-        print(
-            "Inserted matching comments into comments_to_comments_1 table successfully."
-        )
-
-        # Delete processed records
-        con.execute(
-            """
-        DELETE FROM comments_working
-        WHERE SUBSTRING(parent_id, 4) IN (SELECT id FROM comments_to_posts)
-        """
-        )
-
-        con.execute("COMMIT")
-        print("Successfully moved and deleted matching comments")
-
-    except Exception as e:
-        con.execute("ROLLBACK")
-        print(f"Error: {e}")
-
-
-# Add comments_to_comments tables
-def add_comments_to_comments_tables(con):
-    current_level = 1
-    rows_found = 1  # Initialize with a non-zero value to enter the loop
-
-    while rows_found > 0:
-        next_level = current_level + 1
-
-        # Start transaction
-        con.execute("BEGIN TRANSACTION")
-
-        try:
-            # First, count how many comments we'll process at this level
-            count_query = f"""
-            SELECT COUNT(*)
-            FROM comments_working AS c
-            WHERE SUBSTRING(c.parent_id, 4) IN (
-                SELECT id FROM comments_to_comments_{current_level}
-            )
-            """
-            rows_found = con.execute(count_query).fetchone()[0]
-            print(f"Found {rows_found} comments for level {next_level}")
-
-            if rows_found > 0:
-                # Create the next level table with the matching comments
-                create_table_query = f"""
-                CREATE OR REPLACE TABLE comments_to_comments_{next_level} AS
-                SELECT id, body, score, author, SUBSTRING(parent_id, 4) AS parent_id
-                FROM comments_working
-                WHERE SUBSTRING(parent_id, 4) IN (
-                    SELECT id FROM comments_to_comments_{current_level}
-                )
-                """
-                con.execute(create_table_query)
-
-                # Delete the processed rows from comments_working
-                delete_query = f"""
-                DELETE FROM comments_working
-                WHERE SUBSTRING(parent_id, 4) IN (
-                    SELECT id FROM comments_to_comments_{current_level}
-                )
-                """
-                con.execute(delete_query)
-
-                # Commit the transaction
-                con.execute("COMMIT")
-                print(f"Created level {next_level} table and deleted processed rows")
-                current_level = next_level
-            else:
-                print(f"No more nested comments found after level {current_level}")
-                con.execute("ROLLBACK")  # No changes needed
-                break
-
-        except Exception as e:
-            con.execute("ROLLBACK")
-            print(f"Error processing level {next_level}: {e}")
-            break
+from stats import log_with_resources, create_row_counts_table
+from langdetect import detect
+import random
 
 
 def cascading_comment_deletion(con, starting_level):
@@ -303,7 +91,7 @@ def cascading_comment_deletion(con, starting_level):
     con.commit()
 
 
-def add_initial_tables(con, posts_file, comments_file):
+def add_initial_tables(con, posts_file, comments_file, limit=0):
     # Create posts table
     query = f"""
     CREATE OR REPLACE TABLE posts AS
@@ -311,7 +99,7 @@ def add_initial_tables(con, posts_file, comments_file):
     FROM read_csv_auto('{posts_file}',
                     null_padding=True,
                     ignore_errors=True)
-    LIMIT 2800000
+    LIMIT {limit if limit > 0 else '' }
     """
     con.execute(query)
     log_with_resources("posts table created successfully.")
@@ -353,7 +141,7 @@ def add_initial_tables(con, posts_file, comments_file):
 
 
 # Add comments_to_comments tables
-def add_comments_to_comments_tables_old(con, comments_file):
+def add_comments_to_comments_tables(con, comments_file):
     current_level = 1
     rows_found = 1  # Initialize with a non-zero value to enter the loop
 
@@ -594,3 +382,558 @@ def create_threads_table(con, threads_table):
         con.execute(final_query)
 
     log_with_resources(f"Created {threads_table} table successfully.")
+
+
+def make_threads_unique(con, filtered_table):
+    cursor = con.execute("PRAGMA table_info('lookup_table')")
+    columns = [row[1] for row in cursor.fetchall()]
+    columns_str = ", ".join(columns)
+
+    # Generate the dynamic part of the query for counting non-NULL columns
+    non_null_counts = [
+        f"CASE WHEN comments_to_comments_{i} IS NOT NULL THEN 1 ELSE 0 END"
+        for i in range(1, len(columns) - 1)
+    ]
+    non_null_counts_str = " + ".join(non_null_counts)
+
+    # Query to select distinct comments_to_posts IDs, keeping only the longest thread
+    distinct_threads_query = f"""
+    WITH ranked_threads AS (
+        SELECT
+            *,
+            -- Count the number of non-NULL columns in each thread
+            (CASE WHEN posts IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN comments_to_posts IS NOT NULL THEN 1 ELSE 0 END +
+            {non_null_counts_str}) AS thread_length,
+            -- Assign a random number to each thread for tie-breaking
+            ROW_NUMBER() OVER (
+                PARTITION BY comments_to_posts
+                ORDER BY thread_length DESC, RANDOM()
+            ) AS random_rank
+        FROM all_threads
+    )
+    SELECT
+        {columns_str}
+    FROM ranked_threads
+    WHERE random_rank = 1  -- Keep only the thread with the highest thread_length, using random_rank for tie-breaking
+      AND comments_to_posts IS NOT NULL  -- Apply only when comments_to_posts is not NULL
+    ORDER BY comments_to_posts;
+    """
+
+    # Execute the query and replace the threads table with the filtered results
+    con.execute(
+        f"CREATE OR REPLACE TABLE {filtered_table} AS " + distinct_threads_query
+    )
+    log_with_resources(
+        f"Filtered {filtered_table} to keep only the longest thread for each comments_to_posts ID."
+    )
+
+
+def filter_threads(
+    con,
+    table_to_filter,
+    new_table,
+    num_authors=None,
+    min_authors=False,
+    check_english=False,
+):
+    # Get column names (excluding 'posts')
+    columns = con.execute(
+        f"""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = '{table_to_filter}'
+        AND column_name != 'posts'
+        """
+    ).fetchall()
+    columns = [
+        col[0] for col in columns
+    ]  # e.g., ['comments_to_posts', 'comments_to_comments_1', ...]
+
+    # Prefetch all ID-to-author mappings for efficiency
+    id_to_author = {}
+    id_to_content = {}  # Track content (title, self_text, body) for each ID
+
+    # Fetch posts data
+    posts_data = con.execute("SELECT id, author, title, selftext FROM posts").fetchall()
+    for id, author, title, selftext in posts_data:
+        id_to_author[id] = author
+        # Check if any content is [deleted] or [removed]
+        id_to_content[id] = (
+            author == "[deleted]"
+            or author == "[removed]"
+            or title == "[deleted]"
+            or title == "[removed]"
+            or selftext == "[deleted]"
+            or selftext == "[removed]"
+        )
+
+    # Fetch comments data for each comment table
+    for table in columns:
+        comments_data = con.execute(f"SELECT id, author, body FROM {table}").fetchall()
+        for id, author, body in comments_data:
+            id_to_author[id] = author
+            # Check if any content is [deleted] or [removed]
+            is_deleted_or_removed = (
+                author == "[deleted]"
+                or author == "[removed]"
+                or body == "[deleted]"
+                or body == "[removed]"
+            )
+            is_not_english = False
+            if (
+                check_english
+                and table == "comments_to_posts"
+                and not is_deleted_or_removed
+            ):
+                # Check if the content is in English
+                try:
+                    lang = detect(body)
+                    if lang != "en":
+                        is_not_english = True
+                except Exception:
+                    is_not_english = True
+            id_to_content[id] = is_deleted_or_removed or is_not_english
+
+    if num_authors is None:
+        # Direct deletion approach for the simple filtering case
+        # Create a temporary table to store IDs of rows to delete
+        con.execute(
+            "CREATE TEMPORARY TABLE IF NOT EXISTS rows_to_delete (row_id VARCHAR)"
+        )
+
+        # Fetch rows and identify ones with deleted content
+        rows = con.execute(
+            f"SELECT comments_to_posts, * FROM {table_to_filter}"
+        ).fetchall()
+        rows_to_delete = []
+
+        for row in rows:
+            pk_value = row[0]  # The primary key value
+            # Check if any ID in the row has [deleted] or [removed] content
+            has_deleted_content = False
+            for id_value in row[1:]:  # Skip the primary key
+                if id_value is not None and id_to_content.get(id_value, False):
+                    has_deleted_content = True
+                    break
+
+            if has_deleted_content:
+                rows_to_delete.append((pk_value,))
+
+        # Batch delete rows with deleted content
+        if rows_to_delete:
+            con.executemany("INSERT INTO rows_to_delete VALUES (?)", rows_to_delete)
+            count_before = con.execute(
+                f"SELECT COUNT(*) FROM {table_to_filter}"
+            ).fetchone()[0]
+            con.execute(
+                f"DELETE FROM {table_to_filter} WHERE comments_to_posts IN (SELECT row_id FROM rows_to_delete)"
+            )
+            count_after = con.execute(
+                f"SELECT COUNT(*) FROM {table_to_filter}"
+            ).fetchone()[0]
+            log_with_resources(
+                f"Deleted {count_before - count_after} rows with deleted content from {table_to_filter}."
+            )
+
+        # Drop temporary table
+        con.execute("DROP TABLE IF EXISTS rows_to_delete")
+
+    else:
+        # For num_authors case, use the original approach with a new table
+        con.execute(
+            f"""
+            CREATE OR REPLACE TABLE {new_table} AS
+            SELECT * FROM {table_to_filter} WHERE FALSE
+            """
+        )
+
+        # Fetch all rows from the threads table
+        rows = con.execute(f"SELECT * FROM {table_to_filter}").fetchall()
+
+        # Process each row
+        valid_rows = []
+        for row in rows:
+            # Check if any ID in the row has [deleted] or [removed] content
+            has_deleted_content = False
+            for id_value in row:
+                if id_value is not None and id_to_content.get(id_value, False):
+                    has_deleted_content = True
+                    break
+
+            if has_deleted_content:
+                continue  # Skip this row
+
+            # Check author criteria
+            authors = {}  # Reset author counts for each row
+            # Iterate over columns (skip 'posts' which is the first column)
+            for id_value in row[1:]:  # Skip index 0 (posts)
+                if id_value is None:
+                    continue
+                author = id_to_author.get(id_value)
+                if author:
+                    authors[author] = authors.get(author, 0) + 1
+
+            # Check criteria
+            if min_authors:
+                # For min_authors, check if there are at least num_authors unique authors
+                if len(authors) >= num_authors:
+                    valid_rows.append(row)
+            else:
+                if len(authors) == num_authors and all(
+                    count >= 2 for count in authors.values()
+                ):
+                    valid_rows.append(row)
+
+        # Batch insert valid rows into new_table
+        if valid_rows:
+            # Dynamically generate placeholders for the INSERT query
+            placeholders = ", ".join(
+                ["?"] * (len(columns) + 1)
+            )  # +1 for 'posts' column
+            con.executemany(
+                f"INSERT INTO {new_table} VALUES ({placeholders})", valid_rows
+            )
+            log_with_resources(
+                f"Created {new_table} with {len(valid_rows)} valid rows."
+            )
+
+
+def filter_by_score(con, table_to_filter):
+    """
+    Create a subset of threads with post score above 1000 and a subset of threads with post score below 1000.
+    """
+    con.execute(
+        f"""
+        CREATE OR REPLACE TABLE {table_to_filter}_viral AS
+        SELECT *
+        FROM {table_to_filter}
+        WHERE posts IN (SELECT id FROM posts WHERE score >= 1000)
+        """
+    )
+    log_with_resources(f"Created {table_to_filter}_viral table")
+    con.execute(
+        f"""
+        CREATE OR REPLACE TABLE {table_to_filter}_non_viral AS
+        SELECT *
+        FROM {table_to_filter}
+        WHERE posts IN (SELECT id FROM posts WHERE score < 1000)
+        """
+    )
+    log_with_resources(f"Created {table_to_filter}_non_viral table")
+
+
+def create_testing_threads(
+    con, table_to_filter, new_table, num_threads_per_category=20
+):
+    log_with_resources(f"Starting creation of {new_table}...")
+    con.execute(
+        f"""
+        CREATE OR REPLACE TABLE {new_table} AS
+        SELECT * FROM {table_to_filter} WHERE FALSE
+        """
+    )
+
+    # List to store all comments_to_posts IDs that will be moved
+    all_ids_to_move = []
+
+    # Define the static source tables
+    source_tables = [
+        "threads_2_authors",
+        "threads_3_authors",
+        "threads_4_authors",
+        "threads_5_authors",
+        "threads_viral",
+        "threads_non_viral",
+    ]
+    subreddit_tables = [
+        "AskReddit_threads",
+        "memes_threads",
+        "distantsocializing_threads",
+        "ACTrade_threads",
+        "RedditSessions_threads",
+        "AmItheAsshole_threads",
+        "wallstreetbets_threads",
+        "politics_threads",
+        "teenagers_threads",
+        "AnimalCrossing_threads",
+    ]
+
+    for source_tbl in source_tables:
+        try:
+            eligible_ids_query = f"""
+                SELECT t1.comments_to_posts
+                FROM {source_tbl} AS t1
+                JOIN {table_to_filter} AS t2
+                ON t1.comments_to_posts = t2.comments_to_posts
+            """
+            eligible_ids = [
+                row[0] for row in con.execute(eligible_ids_query).fetchall()
+            ]
+            # Randomly select num_threads_per_category threads
+            selected_ids = random.sample(
+                eligible_ids, min(len(eligible_ids), num_threads_per_category)
+            )
+            log_with_resources(
+                f"Selected {len(selected_ids)} threads from {source_tbl}."
+            )
+
+            all_ids_to_move.extend(selected_ids)
+            all_ids_to_move = list(set(all_ids_to_move))
+        except Exception as e:
+            log_with_resources(
+                f"Error processing {source_tbl}: {e}. Continuing with other tables."
+            )
+
+    # Collect all eligible IDs from all subreddit tables
+    all_subreddit_ids = []
+    for source_tbl in subreddit_tables:
+        try:
+            eligible_ids_query = f"""
+                SELECT t1.comments_to_posts
+                FROM {source_tbl} AS t1
+                JOIN {table_to_filter} AS t2
+                ON t1.comments_to_posts = t2.comments_to_posts
+            """
+            eligible_ids = [
+                row[0] for row in con.execute(eligible_ids_query).fetchall()
+            ]
+            all_subreddit_ids.extend(eligible_ids)
+            log_with_resources(
+                f"Found {len(eligible_ids)} eligible threads from {source_tbl}."
+            )
+        except Exception as e:
+            log_with_resources(
+                f"Error processing {source_tbl}: {e}. Continuing with other tables."
+            )
+
+    # Remove duplicates from all subreddit IDs
+    all_subreddit_ids = list(set(all_subreddit_ids))
+    log_with_resources(
+        f"Total unique threads across all subreddits: {len(all_subreddit_ids)}"
+    )
+
+    # Randomly select up to 100 threads from all subreddits combined
+    subreddit_sample_size = min(100, len(all_subreddit_ids))
+    if all_subreddit_ids:
+        selected_subreddit_ids = random.sample(all_subreddit_ids, subreddit_sample_size)
+        log_with_resources(
+            f"Selected {len(selected_subreddit_ids)} threads from all subreddits combined."
+        )
+        all_ids_to_move.extend(selected_subreddit_ids)
+        all_ids_to_move = list(set(all_ids_to_move))
+
+    if all_ids_to_move:
+        # Create a temporary table for IDs to move
+        con.execute("CREATE TEMPORARY TABLE temp_ids_to_move (id VARCHAR);")
+        con.executemany(
+            "INSERT INTO temp_ids_to_move VALUES (?)", [(id,) for id in all_ids_to_move]
+        )
+
+        # Insert selected threads into testing_threads
+        count_inserted_before = con.execute(
+            f"SELECT COUNT(*) FROM {new_table};"
+        ).fetchone()[0]
+        con.execute(
+            f"""
+            INSERT INTO {new_table}
+            SELECT t1.*
+            FROM {table_to_filter} AS t1
+            JOIN temp_ids_to_move AS t2 ON t1.comments_to_posts = t2.id;
+        """
+        )
+        count_inserted_after = con.execute(
+            f"SELECT COUNT(*) FROM {new_table};"
+        ).fetchone()[0]
+        log_with_resources(
+            f"Inserted {count_inserted_after - count_inserted_before} threads into {new_table}."
+        )
+
+        # Delete selected threads from training_threads
+        count_deleted_before = con.execute(
+            f"SELECT COUNT(*) FROM {table_to_filter};"
+        ).fetchone()[0]
+        con.execute(
+            f"""
+            DELETE FROM {table_to_filter}
+            WHERE comments_to_posts IN (SELECT id FROM temp_ids_to_move);
+        """
+        )
+        count_deleted_after = con.execute(
+            f"SELECT COUNT(*) FROM {table_to_filter};"
+        ).fetchone()[0]
+        log_with_resources(
+            f"Deleted {count_deleted_before - count_deleted_after} threads from {table_to_filter}."
+        )
+
+        # Drop the temporary table
+        con.execute("DROP TABLE temp_ids_to_move;")
+    else:
+        log_with_resources("No threads found to move to testing_threads.")
+    log_with_resources(f"Finished creation of {new_table}.")
+
+
+def filter_by_constructiveness(con, table_to_filter, new_table, jsonl_file):
+    """
+    Create a subset of constructive threads from table_to_filter and save to new_table by checking
+    if the comments_to_posts have prediction == 1 in the jsonl_file.
+    """
+    import json
+
+    log_with_resources(f"Starting constructiveness filtering from {jsonl_file}...")
+
+    # Read the jsonl file and collect all sdids with prediction == 1
+    constructive_sdids = set()
+
+    try:
+        with open(jsonl_file, "r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    # Check if this entry has prediction == 1 (constructive)
+                    if data.get("prediction") == 1:
+                        constructive_sdids.add(data.get("sdid"))
+                except json.JSONDecodeError as e:
+                    log_with_resources(f"Error parsing JSON on line {line_num}: {e}")
+                    continue
+    except FileNotFoundError:
+        log_with_resources(f"Error: Could not find file {jsonl_file}")
+        return
+    except Exception as e:
+        log_with_resources(f"Error reading file {jsonl_file}: {e}")
+        return
+
+    log_with_resources(
+        f"Found {len(constructive_sdids)} constructive entries in {jsonl_file}"
+    )
+
+    if not constructive_sdids:
+        log_with_resources("No constructive entries found. Creating empty table.")
+        # Create empty table with same structure
+        con.execute(
+            f"CREATE OR REPLACE TABLE {new_table} AS SELECT * FROM {table_to_filter} WHERE FALSE"
+        )
+        return
+
+    # Create a temporary table with the constructive sdids for efficient filtering
+    con.execute("CREATE TEMPORARY TABLE temp_constructive_sdids (sdid VARCHAR)")
+
+    # Insert constructive sdids in batches
+    constructive_list = list(constructive_sdids)
+    batch_size = 1000
+    for i in range(0, len(constructive_list), batch_size):
+        batch = constructive_list[i : i + batch_size]
+        con.executemany(
+            "INSERT INTO temp_constructive_sdids VALUES (?)",
+            [(sdid,) for sdid in batch],
+        )
+
+    # Filter the table to include only constructive threads
+    # The comments_to_posts column contains the ID that should match with sdid
+    filter_query = f"""
+    CREATE OR REPLACE TABLE {new_table} AS
+    SELECT t.*
+    FROM {table_to_filter} t
+    JOIN temp_constructive_sdids c ON t.comments_to_posts = c.sdid
+    """
+
+    con.execute(filter_query)
+
+    # Get count of filtered results
+    count_result = con.execute(f"SELECT COUNT(*) FROM {new_table}").fetchone()[0]
+
+    # Clean up temporary table
+    con.execute("DROP TABLE temp_constructive_sdids")
+
+    log_with_resources(
+        f"Created {new_table} with {count_result} constructive threads from {table_to_filter}"
+    )
+
+
+def main():
+    monitoring_active = True
+
+    def continuous_resource_monitor(interval=1800):
+        while monitoring_active:
+            log_with_resources("Monitoring during execution")
+            time.sleep(interval)
+
+    # Start the background monitoring thread
+    monitor_thread = threading.Thread(target=continuous_resource_monitor, args=(60,))
+    monitor_thread.daemon = True  # will exit when main thread exits
+    monitor_thread.start()
+
+    db_path = "../data/database_subset10.db"
+    con = duckdb.connect(db_path)
+    log_with_resources("initial resources")
+    con.execute("SET threads TO 20;")
+    con.execute("PRAGMA verify_parallelism;")
+    con.execute("PRAGMA memory_limit='30GB';")
+    log_with_resources("threads set to 20")
+
+    # Create initial tables
+    add_initial_tables(con, "../data/posts.csv", "../data/comments.csv", limit=28000000)
+    add_comments_to_comments_tables(con, "../data/comments.csv")
+    for table in con.execute("SHOW TABLES").fetchdf()["name"]:
+        print(f"Table: {table}")
+        print(con.execute(f"SELECT COUNT(*) FROM {table}").fetchdf())
+        print("\n")
+    create_row_counts_table(con)
+    cascading_comment_deletion(con, 75)
+    create_row_counts_table(con)
+
+    # Create threads tables
+    create_lookup_table(con)
+    create_threads_table(con=con, threads_table="all_threads")
+    make_threads_unique(con, "threads")
+    filter_threads(con, "threads", "threads", num_authors=None)
+    filter_threads(
+        con,
+        "threads",
+        "training_threads",
+        num_authors=2,
+        min_authors=True,
+        check_english=True,
+    )
+    filter_by_constructiveness(
+        con,
+        "training_threads",
+        "constructive_threads",
+        "../training_data/reddit_train_annotated.jsonl",
+    )
+
+    threads_tables = ["threads", "training_threads", "constructive_threads"]
+    for thread_table in threads_tables:
+        # Create subsets with 2,3,4,5 authors
+        for i in range(2, 6):
+            filter_threads(
+                con, thread_table, f"{thread_table}_{i}_authors", num_authors=i
+            )
+
+        # Create viral and non-viral subsets
+        filter_by_score(con, thread_table)
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+        distribution = existing_data[f"subreddit_distribution_{thread_table}"]
+        subreddits = [
+            key
+            for key, value in sorted(
+                distribution.items(), key=lambda x: x[1], reverse=True
+            )[:5]
+        ]
+        # Create tables and stats for top 5 subreddits in each main table
+        for subreddit in subreddits:
+            create_subreddit_tables(con, subreddit, threads_table=thread_table)
+
+    monitoring_active = False
+    monitor_thread.join()
+    log_with_resources("Script finished")
+    con.commit()
+    con.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -243,8 +243,9 @@ def main():
     print("Reddit Subreddit Statistics Analysis")
     print("=" * 50)
 
+    model = "qwen_1.7B_inst"  # Change model name as needed
     # File paths
-    base_dir = "/home/niklas/reddit_project/training_data"
+    base_dir = f"../training_data/{model}"
     file_with_thinking = os.path.join(
         base_dir, "inst_annotated_data_reddit_with_thinking.jsonl"
     )
@@ -272,7 +273,7 @@ def main():
 
     # Save to CSV
     output_file = (
-        "/home/niklas/reddit_project/training_data/reddit_subreddit_statistics.csv"
+        "../training_data/reddit_subreddit_statistics.csv"
     )
     summary_df.to_csv(output_file, index=False)
     print(f"\nDetailed statistics saved to: {output_file}")
@@ -295,7 +296,7 @@ def main():
     }
 
     json_output_file = (
-        "/home/niklas/reddit_project/training_data/reddit_subreddit_statistics.json"
+        "../training_data/reddit_subreddit_statistics.json"
     )
     with open(json_output_file, "w") as f:
         json.dump(json_output, f, indent=4)

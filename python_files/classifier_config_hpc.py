@@ -34,7 +34,7 @@ class ClassifierConfig:
 
         # Mean Teacher configuration
         self.USE_MEAN_TEACHER = (
-            False  # Set to True to use Mean Teacher approach for curriculum learning
+            False  # Set to True to use Mean Teacher approach instead of self-training
         )
         self.EMA_DECAY = 0.999  # Exponential Moving Average decay factor for teacher model (0.999 is common)
 
@@ -60,12 +60,12 @@ class ClassifierConfig:
             10  # Number of epochs the student trains on each curriculum iteration (1+)
         )
         self.CONFIDENCE_THRESHOLD_START = (
-            0.975  # Initial high confidence for pseudo-labeling (increased from 0.95)
+            0.975  # Initial high confidence for pseudo-labeling
         )
-        self.CONFIDENCE_THRESHOLD_END = (
-            0.60  # Final lower confidence threshold (increased from 0.60)
+        self.CONFIDENCE_THRESHOLD_END = 0.60  # Final lower confidence threshold
+        self.CONFIDENCE_DECAY_FACTOR = (
+            0.025  # How much the confidence threshold decreases per iteration
         )
-        self.CONFIDENCE_DECAY_FACTOR = 0.025  # How much the confidence threshold decreases per iteration (slower decay)
         self.PSEUDO_LABELING_TEMPERATURE = (
             1.0  # Temperature scaling for pseudo-labeling to reduce overconfidence
         )
@@ -129,7 +129,7 @@ class ClassifierConfig:
         self.TEST_THRESHOLDS = [0.5]  # Thresholds to test for predictions
 
         # Instruction tuning configuration (for QWEN models in testing mode)
-        self.USE_INSTRUCTION_TUNING = (
+        self.USE_LANGUAGE_MODEL = (
             False  # Set to True to use instruction tuning format with QWEN models
         )
         self.INSTRUCTION_MODEL_NAME = (

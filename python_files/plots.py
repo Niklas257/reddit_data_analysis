@@ -1,92 +1,82 @@
-# import duckdb  # Commented out as it's not used
 import matplotlib.pyplot as plt
 import json
 import os
 from matplotlib.ticker import ScalarFormatter
 import re
 from create_database import (
-    # add_initial_tables,  # Commented out as it's not used
-    # add_comments_to_comments_tables,  # Commented out as it's not used
-    # create_lookup_table,  # Commented out as it's not used
-    # create_subreddit_tables,  # Commented out as it's not used
-    # create_training_threads_table,  # Commented out as it's not used
     sort_key,
 )
 
-# from filter_database import make_training_threads_unique, filter_training_threads  # Commented out as it's not used
-
-# db = "../data_scc/database_subset10.db"
-# con = duckdb.connect(db)
 saved_stats = "../data/saved_stats.json"
+threads_table = "training_threads"
 
-# Define more specific groupings
 category_groups = {
     "author_distribution": {
         # Similar groupings for author_distribution stats
         "virality": [
-            "author_distribution_training_threads",
-            "author_distribution_training_threads_viral",
-            "author_distribution_training_threads_non_viral",
+            f"author_distribution_{threads_table}",
+            f"author_distribution_{threads_table}_viral",
+            f"author_distribution_{threads_table}_non_viral",
         ],
         "subreddits": [
-            "author_distribution_training_threads",
-            "author_distribution_AskReddit_training_threads",
-            "author_distribution_memes_training_threads",
-            "author_distribution_distantsocializing_training_threads",
-            "author_distribution_ACTrade_training_threads",
-            "author_distribution_RedditSessions_training_threads",
+            f"author_distribution_{threads_table}",
+            f"author_distribution_AskReddit_{threads_table}",
+            f"author_distribution_ACTrade_{threads_table}",
+            f"author_distribution_memes_{threads_table}",
+            f"author_distribution_wallstreetbets_{threads_table}",
+            f"author_distribution_AnimalCrossing_{threads_table}",
         ],
     },
     "lengths": {
         # Similar groupings for lengths stats
         "virality": [
-            "thread_lengths_training_threads",
-            "thread_lengths_training_threads_viral",
-            "thread_lengths_training_threads_non_viral",
+            f"thread_lengths_{threads_table}",
+            f"thread_lengths_{threads_table}_viral",
+            f"thread_lengths_{threads_table}_non_viral",
         ],
         "participants": [
-            "thread_lengths_training_threads",
-            "thread_lengths_training_threads_2_authors",
-            "thread_lengths_training_threads_3_authors",
-            "thread_lengths_training_threads_4_authors",
-            "thread_lengths_training_threads_5_authors",
+            f"thread_lengths_{threads_table}",
+            f"thread_lengths_{threads_table}_2_authors",
+            f"thread_lengths_{threads_table}_3_authors",
+            f"thread_lengths_{threads_table}_4_authors",
+            f"thread_lengths_{threads_table}_5_authors",
         ],
         "subreddits": [
-            "thread_lengths_training_threads",
-            "thread_lengths_AskReddit_training_threads",
-            "thread_lengths_memes_training_threads",
-            "thread_lengths_distantsocializing_training_threads",
-            "thread_lengths_ACTrade_training_threads",
-            "thread_lengths_RedditSessions_training_threads",
+            f"thread_lengths_{threads_table}",
+            f"thread_lengths_AskReddit_{threads_table}",
+            f"thread_lengths_ACTrade_{threads_table}",
+            f"thread_lengths_memes_{threads_table}",
+            f"thread_lengths_wallstreetbets_{threads_table}",
+            f"thread_lengths_AnimalCrossing_{threads_table}",
         ],
     },
     "summed_score": {
         # Similar groupings for score stats
         "virality": [
-            "thread_score_distribution_training_threads",
-            "thread_score_distribution_training_threads_viral",
-            "thread_score_distribution_training_threads_non_viral",
+            f"thread_score_distribution_{threads_table}",
+            f"thread_score_distribution_{threads_table}_viral",
+            f"thread_score_distribution_{threads_table}_non_viral",
         ],
         "participants": [
-            "thread_score_distribution_training_threads",
-            "thread_score_distribution_training_threads_2_authors",
-            "thread_score_distribution_training_threads_3_authors",
-            "thread_score_distribution_training_threads_4_authors",
-            "thread_score_distribution_training_threads_5_authors",
+            f"thread_score_distribution_{threads_table}",
+            f"thread_score_distribution_{threads_table}_2_authors",
+            f"thread_score_distribution_{threads_table}_3_authors",
+            f"thread_score_distribution_{threads_table}_4_authors",
+            f"thread_score_distribution_{threads_table}_5_authors",
         ],
         "subreddits": [
-            "thread_score_distribution_training_threads",
-            "thread_score_distribution_AskReddit_training_threads",
-            "thread_score_distribution_memes_training_threads",
-            "thread_score_distribution_distantsocializing_training_threads",
-            "thread_score_distribution_ACTrade_training_threads",
-            "thread_score_distribution_RedditSessions_training_threads",
+            f"thread_score_distribution_{threads_table}",
+            f"thread_score_distribution_AskReddit_{threads_table}",
+            f"thread_score_distribution_ACTrade_{threads_table}",
+            f"thread_score_distribution_memes_{threads_table}",
+            f"thread_score_distribution_wallstreetbets_{threads_table}",
+            f"thread_score_distribution_AnimalCrossing_{threads_table}",
         ],
     },
 }
 
 # Make sure the plots directory exists
-os.makedirs("../plots", exist_ok=True)
+os.makedirs("../data/plots", exist_ok=True)
 
 # Define a professional color palette with good distinguishability
 PROFESSIONAL_COLORS = [
@@ -111,15 +101,15 @@ def concise_legend_label(key):
     # For subreddit-specific keys
     subreddits = [
         "AskReddit",
-        "memes",
-        "distantsocializing",
         "ACTrade",
-        "RedditSessions",
+        "memes",
+        "wallstreetbets",
+        "AnimalCrossing",
     ]
     for sub in subreddits:
-        if f"_{sub}_" in key or key.endswith(f"_{sub}_training_threads"):
+        if f"_{sub}_" in key or key.endswith(f"_{sub}_{threads_table}"):
             return sub
-    # For keys like 'thread_lengths_training_threads_2_authors'
+    # For keys like 'thread_lengths_{threads_table}_2_authors'
     if "_authors" in key:
         match = re.search(r"(\d+)_authors", key)
         if match:
@@ -129,7 +119,7 @@ def concise_legend_label(key):
     elif "_viral" in key:
         return "Viral"
     # Special case for 'threads' only (not ending with _authors)
-    elif key.endswith("_training_threads") and not re.search(r"_\d+_authors", key):
+    elif key.endswith(f"_{threads_table}") and not re.search(r"_\d+_authors", key):
         return "All Threads"
     # Fallback: prettify the last part
     return key.replace("_", " ").title()
@@ -454,7 +444,7 @@ for category, groups in category_groups.items():
 
         # Save plot
         safe_group_name = "".join(c if c.isalnum() else "_" for c in group_name)
-        output_path = f"../plots/{category}_{safe_group_name}.png"
+        output_path = f"../data/plots/{category}_{safe_group_name}.png"
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
         plt.close()
 
@@ -468,10 +458,10 @@ for key, values in data.items():
                 key in group_keys
                 and key
                 not in [
-                    "depth_distribution_training_threads",
-                    "author_distribution_training_threads",
-                    "thread_lengths_training_threads",
-                    "thread_score_distribution_training_threads",
+                    f"depth_distribution_{threads_table}",
+                    f"author_distribution_{threads_table}",
+                    f"thread_lengths_{threads_table}",
+                    f"thread_score_distribution_{threads_table}",
                 ]
                 or "depth" in key
                 or "lookup" in key
@@ -500,7 +490,7 @@ for key, values in data.items():
     y = list(values.values())
 
     # Process numerical x-axis
-    if "thread_score_distribution_training_threads" in key:
+    if f"thread_score_distribution_{threads_table}" in key:
         x_int = [int(k) for k in x]
         filtered = [(xi, yi) for xi, yi in zip(x_int, y) if -50 <= xi <= 50]
 
@@ -528,7 +518,7 @@ for key, values in data.items():
 
         # Set the x-axis limits to match the data range
         plt.xlim(min(x), max(x))
-    elif "thread_lengths_training_threads" in key:
+    elif f"thread_lengths_{threads_table}" in key:
         x_int = [int(k) for k in x]
         # Filter values and ensure we start at 1 (no thread has length 0)
         filtered = [(xi, yi) for xi, yi in zip(x_int, y) if 1 <= xi <= 10]
@@ -538,7 +528,7 @@ for key, values in data.items():
 
         x = [xi for xi, _ in filtered]
         y = [yi for _, yi in filtered]
-    elif "author_distribution_training_threads" in key:
+    elif f"author_distribution_{threads_table}" in key:
         x_int = [int(k) for k in x]
         # Filter values and ensure we start at 1 (no thread has 0 authors)
         filtered = [(xi, yi) for xi, yi in zip(x_int, y) if 1 <= xi <= 10]
@@ -565,7 +555,7 @@ for key, values in data.items():
     y = [max(0, v) for v in y]
 
     # Create bar plot for individual stats (keeping as bars for single distributions)
-    if "thread_lengths_training_threads" in key:
+    if f"thread_lengths_{threads_table}" in key:
         # For thread lengths, use integers for x positions
         x_positions = range(len(x))
         bars = plt.bar(x_positions, y, color=PROFESSIONAL_COLORS[0], alpha=0.7)
@@ -585,7 +575,7 @@ for key, values in data.items():
         plt.ticklabel_format(style="sci", axis="y")
         # plt.yticks([0, 1e7, 2e7, 3e7, 4e7], fontsize=25)
         plt.gca().yaxis.offsetText.set_fontsize(25)
-    elif "author_distribution_training_threads" in key:
+    elif f"author_distribution_{threads_table}" in key:
         # For author distribution, use integers for x positions
         x_positions = range(len(x))
         bars = plt.bar(x_positions, y, color=PROFESSIONAL_COLORS[0], alpha=0.7)
@@ -605,7 +595,7 @@ for key, values in data.items():
         plt.ticklabel_format(style="sci", axis="y")
         # plt.yticks([0, 1e7, 2e7, 3e7, 4e7], fontsize=25)
         plt.gca().yaxis.offsetText.set_fontsize(25)
-    elif "thread_score_distribution_training_threads" in key:
+    elif f"thread_score_distribution_{threads_table}" in key:
         # For score distribution, use actual x values
         x_int = [int(k) for k in x]
         filtered = [(xi, yi) for xi, yi in zip(x_int, y) if -10 <= xi <= 30]
@@ -658,13 +648,13 @@ for key, values in data.items():
 
     # Customize plot
     # plt.title(key.replace("_", " ").title(), fontsize=25)
-    # if key == "thread_score_distribution_training_threads":
+    # if key == f"thread_score_distribution_{threads_table}":
     #     plt.title("Summed score - Unspecific Threads", fontsize=25)
-    if key == "thread_lengths_training_threads":
+    if key == f"thread_lengths_{threads_table}":
         plt.xlabel("Lengths", fontsize=25)
-    elif key == "author_distribution_training_threads":
+    elif key == f"author_distribution_{threads_table}":
         plt.xlabel("Number of authors", fontsize=25)
-    elif key == "thread_score_distribution_training_threads":
+    elif key == f"thread_score_distribution_{threads_table}":
         plt.xlabel("Summed score", fontsize=25)
     elif "subreddit_distribution" in key:
         plt.xlabel("Subreddits", fontsize=25)
@@ -681,7 +671,7 @@ for key, values in data.items():
 
     # Save plot (using original naming convention)
     safe_key = "".join(c if c.isalnum() else "_" for c in key)
-    output_path = f"../plots/{safe_key}.png"
+    output_path = f"../data/plots/{safe_key}.png"
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 

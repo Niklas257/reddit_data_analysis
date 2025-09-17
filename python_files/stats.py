@@ -1,5 +1,8 @@
 import json
 from collections import defaultdict
+import threading
+from time import time
+import duckdb
 import numpy as np
 import ast
 import os
@@ -579,3 +582,114 @@ def get_author_distribution(table, con):
     with open("../data/saved_stats.json", "w") as f:
         json.dump(existing_data, f)
     log_with_resources(f"Author distribution for {table} calculated and saved to file.")
+
+
+def main():
+    monitoring_active = True
+
+    def continuous_resource_monitor(interval=1800):
+        while monitoring_active:
+            log_with_resources("Monitoring during execution")
+            time.sleep(interval)
+
+    # Start the background monitoring thread
+    monitor_thread = threading.Thread(target=continuous_resource_monitor, args=(60,))
+    monitor_thread.daemon = True  # will exit when main thread exits
+    monitor_thread.start()
+
+    db_path = "../data/database_subset10.db"
+    con = duckdb.connect(db_path)
+    log_with_resources("initial resources")
+    con.execute("SET threads TO 20;")
+    con.execute("PRAGMA verify_parallelism;")
+    con.execute("PRAGMA memory_limit='30GB';")
+    log_with_resources("threads set to 20")
+
+    # Analyze subsets. Initially I did this only for threads and training_threads. After training and annotating constructive_threads, I added this table as well.
+    threads_tables = ["threads", "training_threads", "constructive_threads"]
+    for thread_table in threads_tables:
+        get_depth_distribution(thread_table, con)
+        get_thread_lengths(thread_table, con)
+        get_number_of_threads(thread_table, con)
+        get_thread_score_distribution(thread_table, con)
+        get_subreddit_distribution(thread_table, con)
+        get_author_distribution(thread_table, con)
+        calculate_weighted_average(f"depth_distribution_{thread_table}")
+        calculate_weighted_average(f"author_distribution_{thread_table}")
+        calculate_weighted_average(f"thread_score_distribution_{thread_table}")
+        calculate_weighted_average(f"thread_lengths_{thread_table}")
+        calculate_variance(f"depth_distribution_{thread_table}")
+        calculate_variance(f"author_distribution_{thread_table}")
+        calculate_variance(f"thread_score_distribution_{thread_table}")
+        calculate_variance(f"thread_lengths_{thread_table}")
+
+        # Stats for subsets with 2,3,4,5 authors
+        for i in range(2, 6):
+            get_depth_distribution(f"{thread_table}_{i}_authors", con)
+            get_thread_lengths(f"{thread_table}_{i}_authors", con)
+            get_number_of_threads(f"{thread_table}_{i}_authors", con)
+            get_thread_score_distribution(f"{thread_table}_{i}_authors", con)
+            get_subreddit_distribution(f"{thread_table}_{i}_authors", con)
+            calculate_weighted_average(f"depth_distribution_{thread_table}_{i}_authors")
+            calculate_weighted_average(
+                f"thread_score_distribution_{thread_table}_{i}_authors"
+            )
+            calculate_weighted_average(f"thread_lengths_{thread_table}_{i}_authors")
+            calculate_variance(f"depth_distribution_{thread_table}_{i}_authors")
+            calculate_variance(f"thread_score_distribution_{thread_table}_{i}_authors")
+            calculate_variance(f"thread_lengths_{thread_table}_{i}_authors")
+
+        # Stats for viral and non-viral subsets
+        for virality_table in [f"{thread_table}_viral", f"{thread_table}_non_viral"]:
+            get_depth_distribution(virality_table, con)
+            get_thread_lengths(virality_table, con)
+            get_number_of_threads(virality_table, con)
+            get_thread_score_distribution(virality_table, con)
+            get_subreddit_distribution(virality_table, con)
+            calculate_weighted_average(f"depth_distribution_{virality_table}")
+            calculate_weighted_average(f"author_distribution_{virality_table}")
+            calculate_weighted_average(f"thread_score_distribution_{virality_table}")
+            calculate_weighted_average(f"thread_lengths_{virality_table}")
+            calculate_variance(f"depth_distribution_{virality_table}")
+            calculate_variance(f"author_distribution_{virality_table}")
+            calculate_variance(f"thread_score_distribution_{virality_table}")
+            calculate_variance(f"thread_lengths_{virality_table}")
+
+        with open("../data/saved_stats.json", "r") as f:
+            existing_data = json.load(f)
+        distribution = existing_data[f"subreddit_distribution_{thread_table}"]
+        subreddits = [
+            key
+            for key, value in sorted(
+                distribution.items(), key=lambda x: x[1], reverse=True
+            )[:5]
+        ]
+        # Stats for top 5 subreddits in each main table
+        for subreddit in subreddits:
+            get_depth_distribution(f"{subreddit}_{thread_table}", con)
+            get_thread_lengths(f"{subreddit}_{thread_table}", con)
+            get_number_of_threads(f"{subreddit}_{thread_table}", con)
+            get_thread_score_distribution(f"{subreddit}_{thread_table}", con)
+            get_author_distribution(f"{subreddit}_{thread_table}", con)
+            calculate_weighted_average(f"depth_distribution_{subreddit}_{thread_table}")
+            calculate_weighted_average(
+                f"author_distribution_{subreddit}_{thread_table}"
+            )
+            calculate_weighted_average(
+                f"thread_score_distribution_{subreddit}_{thread_table}"
+            )
+            calculate_weighted_average(f"thread_lengths_{subreddit}_{thread_table}")
+            calculate_variance(f"depth_distribution_{subreddit}_{thread_table}")
+            calculate_variance(f"author_distribution_{subreddit}_{thread_table}")
+            calculate_variance(f"thread_score_distribution_{subreddit}_{thread_table}")
+            calculate_variance(f"thread_lengths_{subreddit}_{thread_table}")
+
+    monitoring_active = False
+    monitor_thread.join()
+    log_with_resources("Script finished")
+    con.commit()
+    con.close()
+
+
+if __name__ == "__main__":
+    main()

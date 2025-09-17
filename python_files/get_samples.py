@@ -125,7 +125,7 @@ def get_thread_with_metadata(con):
     return result
 
 
-def create_thread_json(num_threads=100, output_file="random_threads.jsonl"):
+def create_thread_json(num_threads=100, output_file="../data/random_threads.jsonl"):
     # Create the JSON Lines file
     with open(output_file, "w", encoding="utf-8") as f:
         for _ in tqdm(range(num_threads), desc="Generating threads"):
@@ -133,41 +133,6 @@ def create_thread_json(num_threads=100, output_file="random_threads.jsonl"):
             # Write the JSON object as a single line
             json.dump(thread_data, f, ensure_ascii=False)
             f.write("\n")
-
-
-def create_subset_tables(con, table):
-    for i in range(3):
-        subset_table = f"{table}_subset_{i+1}"
-        # Create an empty subset table with the same schema as 'threads'
-        # This uses a trick: select no rows from the source table.
-        # Check if {table} exists in the database
-        if not con.execute(
-            f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
-        ).fetchone():
-            print(f"Table {table} does not exist.")
-            return
-        con.execute(
-            f"CREATE OR REPLACE TABLE {subset_table} AS SELECT * FROM {table} WHERE 1=0"
-        )
-
-        # Insert 3 rows into each subset table.
-        for j in range(3):
-            seed = i * 100 + j  # Fixed, unique seed for each insertion.
-            thread = get_random_thread_details(table, con, seed)
-
-            # Assume 'thread' is a DataFrame with one row.
-            # Extract the column names and values.
-            row = thread.iloc[0]
-            cols = thread.columns.tolist()
-
-            # Quote column names; this can help if any names conflict with SQL keywords.
-            col_list = ", ".join([f'"{col}"' for col in cols])
-            # Create a parameter placeholder for each column.
-            placeholders = ", ".join(["?" for _ in cols])
-            sql = f"INSERT INTO {subset_table} ({col_list}) VALUES ({placeholders})"
-            values = tuple(row)
-
-            con.execute(sql, values)
 
 
 def generate_jsonl_from_threads(
