@@ -33,6 +33,7 @@ Self-training setup diagram showing one iteration of the iterative training proc
 - **`create_database.py`**: Build DuckDB database with thread tables → `database_subset10.db`
 - **`get_samples.py`**: Generate random samples from the database
 - **`display_thread.py`**: Render Reddit threads in readable format
+- **`create_constructive_dataset.py`**: Create dataset with only constructive conversations from labeled data → `reddit_threads_constructive.jsonl`
 
 ### Statistical Analysis
 - **`stats.py`**: Generate comprehensive dataset statistics → `saved_stats.json`
